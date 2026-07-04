@@ -429,6 +429,8 @@ EFillMethod Settings::get<EFillMethod>(const std::string& key) const
         return EFillMethod::CROSS_3D;
     case "gyroid"_sw:
         return EFillMethod::GYROID;
+    case "triangle_wave"_sw:
+        return EFillMethod::TRIANGLE_WAVE;
     case "lightning"_sw:
         return EFillMethod::LIGHTNING;
     case "plugin"_sw:

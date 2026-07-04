@@ -401,6 +401,13 @@ private:
     void generateGyroidInfill(OpenLinesSet& result_polylines, Shape& result_polygons);
 
     /*!
+     * Generate triangle wave infill: continuous paths that oscillate as a triangle wave.
+     * \param result_polylines (output) The resulting polylines
+     * \param result_polygons (output) The resulting polygons, if zigzagging accidentally happened to connect the waves in a circle.
+     */
+    void generateTriangleWaveInfill(OpenLinesSet& result_polylines, Shape& result_polygons);
+
+    /*!
      * Generate lightning fill aka minfill aka 'Ribbed Support Vault Infill', see Tricard,Claux,Lefebvre/'Ribbed Support Vaults for 3D Printing of Hollowed Objects'
      * see https://hal.archives-ouvertes.fr/hal-02155929/document
      * \param result (output) The resulting polygons
