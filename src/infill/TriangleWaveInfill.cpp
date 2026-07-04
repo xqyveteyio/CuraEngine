@@ -3,9 +3,8 @@
 
 #include "infill/TriangleWaveInfill.h"
 
-#include <cmath>
+#include <algorithm>
 #include <limits>
-#include <numbers>
 
 #include "geometry/OpenPolyline.h"
 #include "geometry/PointMatrix.h"
@@ -32,104 +31,99 @@ void TriangleWaveInfill::generateTotalTriangleWaveInfill(OpenLinesSet& result_li
 
     const AABB aabb(outline);
 
-    // The wave flanks rise/fall at 45 degrees, so the peak-to-peak amplitude equals half the period.
-    // Rows are spaced line_distance * sqrt(2) apart vertically which makes the perpendicular
-    // distance between the flanks of adjacent waves exactly line_distance, producing the same
-    // material density as the 'lines' pattern.
-    const coord_t pitch = line_distance * std::numbers::sqrt2;
+    // One single wave spans the entire region: the troughs and peaks overshoot the boundary
+    // slightly so that the tips are always clipped off at the walls, where they get connected
+    // along the boundary by the zig-zaggification below.
+    const coord_t overshoot = std::max(line_distance / 2, static_cast<coord_t>(MM2INT(1)));
+    const coord_t y_low = aabb.min_.Y - overshoot;
+    const coord_t y_high = aabb.max_.Y + overshoot;
+    const coord_t flank_height = y_high - y_low;
 
-    // Subdivide the flanks so that boundary crossings are detected on short segments,
-    // similar to what the gyroid pattern does.
-    int num_steps = 1;
-    coord_t step = line_distance * 2;
-    while (step > 500 && num_steps < 8)
-    {
-        num_steps *= 2;
-        step = line_distance * 2 / num_steps;
-    }
-    const coord_t half_period = step * num_steps; // recalculate to avoid rounding errors
-    const coord_t amplitude = half_period; // peak-to-peak, gives 45 degree flanks
+    // Subdivide the flanks so that boundary crossings are detected on short segments.
+    const int num_steps = std::clamp(static_cast<int>(flank_height / 500), 4, 1024);
 
     OpenLinesSet result;
     std::vector<Point2LL> chains[2]; // [start_points[], end_points[]]
     std::vector<unsigned> connected_to[2]; // [chain_indices[], chain_indices[]]
-    std::vector<int> line_numbers; // which row a chain is part of
+    std::vector<int> line_numbers; // which flank (tooth) of the wave a chain is part of
 
-    unsigned num_rows = 0;
-    for (coord_t y = (std::floor(static_cast<double>(aabb.min_.Y) / pitch) - 1) * pitch; y <= aabb.max_.Y + amplitude; y += pitch)
     {
         bool is_first_point = true;
         Point2LL last;
         bool last_inside = false;
         unsigned chain_end_index = 0;
         Point2LL chain_end[2];
-        const coord_t x_min = (std::floor(static_cast<double>(aabb.min_.X) / (2 * half_period)) - 1) * 2 * half_period;
+        // Each half period (one flank) advances by line_distance horizontally.
+        const coord_t x_start = aabb.min_.X - line_distance;
+        const coord_t x_end = aabb.max_.X + line_distance;
         unsigned sample_index = 0;
-        for (coord_t x = x_min; x <= aabb.max_.X + 2 * half_period; x += step, ++sample_index)
+        for (coord_t x = x_start; x <= x_end; x += line_distance)
         {
-            // Triangle wave: rises from -amplitude/2 to +amplitude/2 over the first half period, then falls back.
-            const unsigned phase = sample_index % (2 * num_steps);
-            const coord_t y_offset = (phase <= static_cast<unsigned>(num_steps)) ? -amplitude / 2 + amplitude * static_cast<coord_t>(phase) / num_steps
-                                                                                 : amplitude / 2 - amplitude * static_cast<coord_t>(phase - num_steps) / num_steps;
-            const Point2LL current(x, y + y_offset);
-            const bool current_inside = outline.inside(current, true);
-            if (! is_first_point)
+            const bool rising = (sample_index % 2) == 0;
+            for (int i = (sample_index == 0) ? 0 : 1; i <= num_steps; ++i)
             {
-                if (last_inside && current_inside)
+                const coord_t sub_x = x + line_distance * i / num_steps;
+                const coord_t sub_y = rising ? y_low + flank_height * i / num_steps : y_high - flank_height * i / num_steps;
+                const Point2LL current(sub_x, sub_y);
+                const bool current_inside = outline.inside(current, true);
+                if (! is_first_point)
                 {
-                    // segment doesn't hit the boundary, add it wholly
-                    result.addSegment(last, current);
-                }
-                else if (last_inside != current_inside)
-                {
-                    // segment hits the boundary, add the part that's inside the boundary
-                    OpenLinesSet line;
-                    line.addSegment(last, current);
-                    constexpr bool restitch = false; // only a single line doesn't need stitching
-                    line = outline.intersection(line, restitch);
-                    if (line.size() > 0)
+                    if (last_inside && current_inside)
                     {
-                        // some of the segment is inside the boundary
-                        result.addSegment(line[0][0], line[0][1]);
-                        if (zig_zaggify)
+                        // segment doesn't hit the boundary, add it wholly
+                        result.addSegment(last, current);
+                    }
+                    else if (last_inside != current_inside)
+                    {
+                        // segment hits the boundary, add the part that's inside the boundary
+                        OpenLinesSet line;
+                        line.addSegment(last, current);
+                        constexpr bool restitch = false; // only a single line doesn't need stitching
+                        line = outline.intersection(line, restitch);
+                        if (line.size() > 0)
                         {
-                            chain_end[chain_end_index] = line[0][(line[0][0] != last && line[0][0] != current) ? 0 : 1];
-                            if (++chain_end_index == 2)
+                            // some of the segment is inside the boundary
+                            result.addSegment(line[0][0], line[0][1]);
+                            if (zig_zaggify)
                             {
-                                chains[0].push_back(chain_end[0]);
-                                chains[1].push_back(chain_end[1]);
-                                chain_end_index = 0;
-                                connected_to[0].push_back(std::numeric_limits<unsigned>::max());
-                                connected_to[1].push_back(std::numeric_limits<unsigned>::max());
-                                line_numbers.push_back(num_rows);
+                                chain_end[chain_end_index] = line[0][(line[0][0] != last && line[0][0] != current) ? 0 : 1];
+                                if (++chain_end_index == 2)
+                                {
+                                    chains[0].push_back(chain_end[0]);
+                                    chains[1].push_back(chain_end[1]);
+                                    chain_end_index = 0;
+                                    connected_to[0].push_back(std::numeric_limits<unsigned>::max());
+                                    connected_to[1].push_back(std::numeric_limits<unsigned>::max());
+                                    line_numbers.push_back(static_cast<int>(sample_index));
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // none of the segment is inside the boundary so the point that's actually on the boundary
+                            // is the chain end
+                            if (zig_zaggify)
+                            {
+                                chain_end[chain_end_index] = (last_inside) ? last : current;
+                                if (++chain_end_index == 2)
+                                {
+                                    chains[0].push_back(chain_end[0]);
+                                    chains[1].push_back(chain_end[1]);
+                                    chain_end_index = 0;
+                                    connected_to[0].push_back(std::numeric_limits<unsigned>::max());
+                                    connected_to[1].push_back(std::numeric_limits<unsigned>::max());
+                                    line_numbers.push_back(static_cast<int>(sample_index));
+                                }
                             }
                         }
                     }
-                    else
-                    {
-                        // none of the segment is inside the boundary so the point that's actually on the boundary
-                        // is the chain end
-                        if (zig_zaggify)
-                        {
-                            chain_end[chain_end_index] = (last_inside) ? last : current;
-                            if (++chain_end_index == 2)
-                            {
-                                chains[0].push_back(chain_end[0]);
-                                chains[1].push_back(chain_end[1]);
-                                chain_end_index = 0;
-                                connected_to[0].push_back(std::numeric_limits<unsigned>::max());
-                                connected_to[1].push_back(std::numeric_limits<unsigned>::max());
-                                line_numbers.push_back(num_rows);
-                            }
-                        }
-                    }
                 }
+                last = current;
+                last_inside = current_inside;
+                is_first_point = false;
             }
-            last = current;
-            last_inside = current_inside;
-            is_first_point = false;
+            ++sample_index;
         }
-        ++num_rows;
     }
 
     if (zig_zaggify && chains[0].size() > 0)
@@ -267,7 +261,7 @@ void TriangleWaveInfill::generateTotalTriangleWaveInfill(OpenLinesSet& result_li
                         // we have just jumped a gap so now we want to start drawing again
                         drawing = true;
 
-                        // if this connector is the first to be created or we are not connecting chains from the same row,
+                        // if this connector is the first to be created or we are not connecting chains from the same flank,
                         // remember the chain+point that this connector is starting from
                         if (connector_start_chain_index == std::numeric_limits<unsigned>::max() || line_numbers[chain_index] != line_numbers[connector_start_chain_index])
                         {
