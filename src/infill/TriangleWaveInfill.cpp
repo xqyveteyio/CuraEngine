@@ -9,6 +9,7 @@
 
 #include "geometry/OpenPolyline.h"
 #include "geometry/Shape.h"
+#include "geometry/SingleShape.h"
 #include "utils/AABB.h"
 
 namespace cura
@@ -29,7 +30,7 @@ coord_t columnX(const int64_t k, const coord_t line_distance)
 }
 
 // For every column of the fixed absolute grid, find the lowest and highest boundary crossing of
-// the given outline, and merge them into the extremes found so far (over previous layers).
+// the given outline, and merge them into the extremes found so far.
 void gatherColumnExtremes(const Shape& outline, const coord_t line_distance, std::map<int64_t, std::pair<coord_t, coord_t>>& extremes)
 {
     const AABB aabb(outline);
@@ -99,6 +100,21 @@ OpenLinesSet buildWave(const std::map<int64_t, std::pair<coord_t, coord_t>>& ext
     return wave;
 }
 
+// Build one independent wave per connected part of the given region, so that disjoint areas
+// (multiple models or separate islands of one model) each get their own complete triangle wave
+// instead of one wave spanning across the gaps between them.
+OpenLinesSet buildWaves(const Shape& region, const coord_t line_distance)
+{
+    OpenLinesSet waves;
+    for (const SingleShape& part : region.splitIntoParts())
+    {
+        std::map<int64_t, std::pair<coord_t, coord_t>> extremes;
+        gatherColumnExtremes(part, line_distance, extremes);
+        waves.push_back(buildWave(extremes, line_distance));
+    }
+    return waves;
+}
+
 // Clip a wave to the given outline (in the rotated frame) and rotate the result back to the
 // original coordinate frame. Pieces cut off by the walls become separate polylines which get
 // joined by travel moves later on.
@@ -125,21 +141,19 @@ TriangleWaveFillProvider::TriangleWaveFillProvider(const std::vector<Shape>& lay
         return;
     }
 
-    // Merge the column extremes of all layers: the template region spans, for every column, the
-    // highest and lowest extent that occurs anywhere in the model.
-    std::map<int64_t, std::pair<coord_t, coord_t>> extremes;
+    // The template region is the union of the infill areas of all layers: for every column it
+    // spans the highest and lowest extent that occurs anywhere in the model. Disjoint parts of
+    // the union (separate models or islands) each get their own independent wave.
+    Shape all_layers;
     for (const Shape& layer_outline : layer_outlines)
     {
-        if (layer_outline.empty())
-        {
-            continue;
-        }
         Shape rotated = layer_outline;
         rotated.applyMatrix(rotation_matrix_);
-        gatherColumnExtremes(rotated, line_distance, extremes);
+        all_layers.push_back(rotated);
     }
+    all_layers = all_layers.unionPolygons();
 
-    template_wave_ = buildWave(extremes, line_distance);
+    template_wave_ = buildWaves(all_layers, line_distance);
 }
 
 void TriangleWaveFillProvider::generate(OpenLinesSet& result_lines, const Shape& in_outline) const
@@ -166,10 +180,7 @@ void TriangleWaveInfill::generateTotalTriangleWaveInfill(OpenLinesSet& result_li
     Shape outline = in_outline;
     outline.applyMatrix(rotation_matrix);
 
-    std::map<int64_t, std::pair<coord_t, coord_t>> extremes;
-    gatherColumnExtremes(outline, line_distance, extremes);
-
-    result_lines = clipWave(buildWave(extremes, line_distance), outline, rotation_matrix);
+    result_lines = clipWave(buildWaves(outline, line_distance), outline, rotation_matrix);
 }
 
 } // namespace cura
