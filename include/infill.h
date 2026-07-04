@@ -25,6 +25,7 @@ namespace cura
 
 class SierpinskiFillProvider;
 class SliceMeshStorage;
+class TriangleWaveFillProvider;
 
 class Infill
 {
@@ -401,11 +402,12 @@ private:
     void generateGyroidInfill(OpenLinesSet& result_polylines, Shape& result_polygons);
 
     /*!
-     * Generate triangle wave infill: continuous paths that oscillate as a triangle wave.
+     * Generate triangle wave infill: one continuous path that oscillates as a triangle wave.
      * \param result_polylines (output) The resulting polylines
-     * \param result_polygons (output) The resulting polygons, if zigzagging accidentally happened to connect the waves in a circle.
+     * \param result_polygons (output) The resulting polygons, if stitching accidentally happened to connect the wave in a circle.
+     * \param provider The pre-computed model-global template wave; when given, the flanks are exactly aligned between layers.
      */
-    void generateTriangleWaveInfill(OpenLinesSet& result_polylines, Shape& result_polygons);
+    void generateTriangleWaveInfill(OpenLinesSet& result_polylines, Shape& result_polygons, const std::shared_ptr<TriangleWaveFillProvider>& provider);
 
     /*!
      * Generate lightning fill aka minfill aka 'Ribbed Support Vault Infill', see Tricard,Claux,Lefebvre/'Ribbed Support Vaults for 3D Printing of Hollowed Objects'

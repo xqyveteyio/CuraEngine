@@ -31,6 +31,7 @@ namespace cura
 class Mesh;
 class SierpinskiFillProvider;
 class LightningGenerator;
+class TriangleWaveFillProvider;
 class PrimeTower;
 
 /*!
@@ -323,6 +324,8 @@ public:
     std::shared_ptr<SierpinskiFillProvider> cross_fill_provider; //!< the fractal pattern for the cross (3d) filling pattern
 
     std::shared_ptr<LightningGenerator> lightning_generator; //!< Pre-computed structure for Lightning type infill
+
+    std::shared_ptr<TriangleWaveFillProvider> triangle_wave_fill_provider; //!< Pre-computed model-global template for the triangle wave infill pattern
 
     RetractionAndWipeConfig retraction_wipe_config; //!< Per-Object retraction and wipe settings.
 

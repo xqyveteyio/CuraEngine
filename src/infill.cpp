@@ -163,8 +163,8 @@ void Infill::generate(
         || (zig_zaggify_
             && (pattern_ == EFillMethod::LINES // Zig-zaggified infill patterns print their zags along the walls.
                 || pattern_ == EFillMethod::TRIANGLES || pattern_ == EFillMethod::GRID || pattern_ == EFillMethod::CUBIC || pattern_ == EFillMethod::TETRAHEDRAL
-                || pattern_ == EFillMethod::QUARTER_CUBIC || pattern_ == EFillMethod::TRIHEXAGON || pattern_ == EFillMethod::GYROID || pattern_ == EFillMethod::TRIANGLE_WAVE
-                || pattern_ == EFillMethod::CROSS || pattern_ == EFillMethod::CROSS_3D))
+                || pattern_ == EFillMethod::QUARTER_CUBIC || pattern_ == EFillMethod::TRIHEXAGON || pattern_ == EFillMethod::GYROID || pattern_ == EFillMethod::CROSS
+                || pattern_ == EFillMethod::CROSS_3D))
         || infill_multiplier_ % 2
                == 0) // Multiplied infill prints loops of infill, partly along the walls, if even. For odd multipliers >1 it gets offset by the multiply algorithm itself.
     {
@@ -314,7 +314,7 @@ void Infill::_generate(
         generateGyroidInfill(result_lines, result_polygons);
         break;
     case EFillMethod::TRIANGLE_WAVE:
-        generateTriangleWaveInfill(result_lines, result_polygons);
+        generateTriangleWaveInfill(result_lines, result_polygons, mesh ? mesh->triangle_wave_fill_provider : nullptr);
         break;
     case EFillMethod::LIGHTNING:
         assert(lightning_trees); // "Cannot generate Lightning infill without a generator!\n"
@@ -430,10 +430,19 @@ void Infill::generateGyroidInfill(OpenLinesSet& result_lines, Shape& result_poly
     OpenPolylineStitcher::stitch(line_segments, result_lines, result_polygons, infill_line_width_);
 }
 
-void Infill::generateTriangleWaveInfill(OpenLinesSet& result_lines, Shape& result_polygons)
+void Infill::generateTriangleWaveInfill(OpenLinesSet& result_lines, Shape& result_polygons, const std::shared_ptr<TriangleWaveFillProvider>& provider)
 {
     OpenLinesSet line_segments;
-    TriangleWaveInfill::generateTotalTriangleWaveInfill(line_segments, zig_zaggify_, line_distance_, inner_contour_, fill_angle_);
+    if (provider)
+    {
+        // clip the model-global template wave to this layer, so that the flanks stack up between layers
+        provider->generate(line_segments, inner_contour_);
+    }
+    else
+    {
+        // no cross-layer template available (e.g. support): generate from this outline only
+        TriangleWaveInfill::generateTotalTriangleWaveInfill(line_segments, line_distance_, inner_contour_, fill_angle_);
+    }
     OpenPolylineStitcher::stitch(line_segments, result_lines, result_polygons, infill_line_width_);
 }
 

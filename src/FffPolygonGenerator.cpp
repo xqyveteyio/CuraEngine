@@ -37,6 +37,7 @@
 #include "infill/LightningGenerator.h"
 #include "infill/SierpinskiFillProvider.h"
 #include "infill/SubDivCube.h"
+#include "infill/TriangleWaveInfill.h"
 #include "infill/UniformDensityProvider.h"
 #include "progress/Progress.h"
 #include "progress/ProgressEstimator.h"
@@ -700,6 +701,31 @@ void FffPolygonGenerator::processDerivedWallsSkinInfill(SliceMeshStorage& mesh)
     {
         // TODO: Make all of these into new type pointers (but the cross fill things need to happen too then, otherwise it'd just look weird).
         mesh.lightning_generator = std::make_shared<LightningGenerator>(mesh);
+    }
+
+    // Pre-compute the model-global template wave for the triangle wave infill pattern, so that
+    // the wave flanks are exactly aligned between the layers and stack up into continuous walls.
+    if (mesh.settings.get<coord_t>("infill_line_distance") > 0 && mesh.settings.get<EFillMethod>("infill_pattern") == EFillMethod::TRIANGLE_WAVE)
+    {
+        std::vector<Shape> layer_infill_areas;
+        layer_infill_areas.reserve(mesh.layers.size());
+        for (const SliceLayer& layer : mesh.layers)
+        {
+            Shape layer_infill_area;
+            for (const SliceLayerPart& part : layer.parts)
+            {
+                layer_infill_area.push_back(part.getOwnInfillArea());
+            }
+            layer_infill_areas.push_back(std::move(layer_infill_area));
+        }
+
+        // The wave direction has to be the same on every layer, otherwise the flanks cannot stack up:
+        // use the first configured infill angle (or the default of 45 degrees) for all layers.
+        const std::vector<AngleDegrees> infill_angles = mesh.settings.get<std::vector<AngleDegrees>>("infill_angles");
+        const AngleDegrees fill_angle = infill_angles.empty() ? AngleDegrees(45) : infill_angles.front();
+
+        mesh.triangle_wave_fill_provider
+            = std::make_shared<TriangleWaveFillProvider>(layer_infill_areas, mesh.settings.get<coord_t>("infill_line_distance"), fill_angle);
     }
 
     // combine infill
