@@ -26,6 +26,7 @@ namespace cura
 class SierpinskiFillProvider;
 class SliceMeshStorage;
 class TriangleWaveFillProvider;
+class TriangleWaveTrackingProvider;
 
 class Infill
 {
@@ -377,6 +378,7 @@ private:
         Shape& result_polygons,
         OpenLinesSet& result_lines,
         const Settings& settings,
+        int layer_idx,
         const std::shared_ptr<SierpinskiFillProvider>& cross_fill_pattern = nullptr,
         const std::shared_ptr<LightningLayer>& lightning_layer = nullptr,
         const SliceMeshStorage* mesh = nullptr);
@@ -408,6 +410,21 @@ private:
      * \param provider The pre-computed model-global template wave; when given, the flanks are exactly aligned between layers.
      */
     void generateTriangleWaveInfill(OpenLinesSet& result_polylines, Shape& result_polygons, const std::shared_ptr<TriangleWaveFillProvider>& provider);
+
+    /*!
+     * Generate the tracking ("advanced") triangle wave infill for models whose outline drifts
+     * from layer to layer: the wave is regenerated per layer, with the tooth grid phase locked
+     * onto the layer below so that consecutive layers stay in contact.
+     * \param result_polylines (output) The resulting polylines
+     * \param result_polygons (output) The resulting polygons, if stitching accidentally happened to connect the wave in a circle.
+     * \param provider The pre-computed per-layer waves.
+     * \param layer_idx The layer for which to generate the infill.
+     */
+    void generateTriangleWaveTrackingInfill(
+        OpenLinesSet& result_polylines,
+        Shape& result_polygons,
+        const std::shared_ptr<TriangleWaveTrackingProvider>& provider,
+        int layer_idx);
 
     /*!
      * Generate lightning fill aka minfill aka 'Ribbed Support Vault Infill', see Tricard,Claux,Lefebvre/'Ribbed Support Vaults for 3D Printing of Hollowed Objects'

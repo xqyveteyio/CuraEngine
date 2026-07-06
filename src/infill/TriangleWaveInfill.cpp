@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <map>
+#include <numbers>
 #include <set>
 
 #include "BoostInterface.hpp" // needed for the boost voronoi traits of PolygonsSegmentIndex
@@ -351,6 +353,48 @@ Point2LL roundedPoint(const double x, const double y)
     return { std::llrint(x), std::llrint(y) };
 }
 
+// One tooth of a generated wave; the next layer inherits its grid phase and parity from these.
+struct ToothRecord
+{
+    Point2LL foot; // the rib foot on the skeleton (in the rotated frame)
+    Vec2d apex_direction; // unit normal from the foot towards the apex
+};
+
+// Tracking mode: the teeth of the layer below vote for the phase/parity of this layer's teeth,
+// and the teeth generated on this layer are recorded for the layer above.
+struct TrackingContext
+{
+    const std::vector<ToothRecord>* previous;
+    std::vector<ToothRecord>* current;
+};
+
+// Average cyclic votes (e.g. phases modulo a tooth period) via the circular mean. Returns the
+// fallback (normalized into [0, period)) when there are no votes.
+double circularVote(const std::vector<double>& votes, const double period, const double fallback)
+{
+    auto normalized = [period](const double v)
+    {
+        return std::fmod(std::fmod(v, period) + period, period);
+    };
+    if (votes.empty())
+    {
+        return normalized(fallback);
+    }
+    double sum_x = 0.0;
+    double sum_y = 0.0;
+    for (const double vote : votes)
+    {
+        const double angle = 2.0 * std::numbers::pi * vote / period;
+        sum_x += std::cos(angle);
+        sum_y += std::sin(angle);
+    }
+    if (sum_x == 0.0 && sum_y == 0.0)
+    {
+        return normalized(fallback);
+    }
+    return normalized(std::atan2(sum_y, sum_x) / (2.0 * std::numbers::pi) * period);
+}
+
 // Arc-length parametrization of a branch polyline, with linear interpolation and central
 // difference tangents.
 class PathSampler
@@ -410,6 +454,34 @@ public:
         return { dx / len, dy / len };
     }
 
+    // Arc position of the point on the path closest to q, plus the distance to it.
+    double closestArcPosition(const Point2LL& q, double& distance_out) const
+    {
+        double best_s = 0.0;
+        double best_d2 = std::numeric_limits<double>::max();
+        const size_t segment_count = closed_ ? points_.size() : points_.size() - 1;
+        for (size_t i = 0; i < segment_count; ++i)
+        {
+            const Point2LL& a = points_[i];
+            const Point2LL& b = points_[(i + 1) % points_.size()];
+            const double abx = static_cast<double>(b.X - a.X);
+            const double aby = static_cast<double>(b.Y - a.Y);
+            const double len2 = abx * abx + aby * aby;
+            double t = (len2 > 0.0) ? ((q.X - a.X) * abx + (q.Y - a.Y) * aby) / len2 : 0.0;
+            t = std::clamp(t, 0.0, 1.0);
+            const double px = a.X + abx * t;
+            const double py = a.Y + aby * t;
+            const double d2 = (q.X - px) * (q.X - px) + (q.Y - py) * (q.Y - py);
+            if (d2 < best_d2)
+            {
+                best_d2 = d2;
+                best_s = cumulative_[i] + std::sqrt(len2) * t;
+            }
+        }
+        distance_out = std::sqrt(best_d2);
+        return best_s;
+    }
+
 private:
     std::vector<Point2LL> points_;
     bool closed_;
@@ -435,10 +507,48 @@ double wallDistance(const Shape& region, const Point2LL& p, const Vec2d& directi
     return found ? nearest * ray_length : ray_length;
 }
 
-// Build the triangle wave for one limb: sample rib positions at an even spacing (close to the
-// requested line distance) along the skeleton path, and put the apexes alternately on the left
-// and right wall, perpendicular to the local skeleton direction.
-OpenLinesSet buildRibWave(const PathSampler& sampler, const double s_begin, const double s_end, const bool closed, const Shape& region, const coord_t line_distance, const double ray_length)
+// In tracking mode: let the teeth of the layer below vote for the phase of this branch's tooth
+// grid. Every previous tooth close enough to this skeleton path projects onto it; the projection
+// is shifted by one grid unit when the tooth points to the "other" side, so that phase AND
+// left/right parity are voted for together (the full pattern period is two grid units).
+double chooseTrackedPhase(const PathSampler& sampler, const TrackingContext* tracking, const double period_unit, const double fallback)
+{
+    std::vector<double> votes;
+    if (tracking != nullptr && tracking->previous != nullptr)
+    {
+        for (const ToothRecord& tooth : *tracking->previous)
+        {
+            double distance = 0.0;
+            const double s = sampler.closestArcPosition(tooth.foot, distance);
+            if (distance > 0.75 * period_unit)
+            {
+                continue; // this tooth belongs to another limb / corridor
+            }
+            const Vec2d tangent = sampler.tangentAt(s);
+            const Vec2d normal{ -tangent.y, tangent.x };
+            const double side_dot = normal.x * tooth.apex_direction.x + normal.y * tooth.apex_direction.y;
+            votes.push_back(s - ((side_dot >= 0.0) ? 0.0 : period_unit));
+        }
+    }
+    return circularVote(votes, 2.0 * period_unit, fallback);
+}
+
+// Build the triangle wave for one limb, putting the apexes alternately on the left and right
+// wall, perpendicular to the local skeleton direction.
+//
+// Without tracking, the rib positions are distributed evenly (with a spacing close to the
+// requested line distance) over the skeleton path. With tracking, the ribs lie on a fixed-pitch
+// grid whose phase and parity follow the teeth of the layer below, so that teeth only move as
+// much as the model itself drifts per layer; the generated teeth are recorded for the next layer.
+OpenLinesSet buildRibWave(
+    const PathSampler& sampler,
+    const double s_begin,
+    const double s_end,
+    const bool closed,
+    const Shape& region,
+    const coord_t line_distance,
+    const double ray_length,
+    const TrackingContext* tracking)
 {
     OpenLinesSet wave;
     const double span = closed ? sampler.length() : s_end - s_begin;
@@ -447,18 +557,42 @@ OpenLinesSet buildRibWave(const PathSampler& sampler, const double s_begin, cons
         return wave;
     }
 
-    size_t rib_count;
-    double spacing;
+    // Collect the rib positions and their sides (+1: "left" of the path direction).
+    std::vector<std::pair<double, double>> ribs; // (arc position, side)
     if (closed)
     {
         // A closed loop needs an even tooth count for the alternating wave to close onto itself.
-        rib_count = 2 * std::max<size_t>(1, static_cast<size_t>(std::llround(span / (2.0 * line_distance))));
-        spacing = span / static_cast<double>(rib_count);
+        const size_t rib_count = 2 * std::max<size_t>(1, static_cast<size_t>(std::llround(span / (2.0 * line_distance))));
+        const double spacing = span / static_cast<double>(rib_count);
+        const double phase = (tracking != nullptr) ? chooseTrackedPhase(sampler, tracking, spacing, 0.0) : 0.0;
+        for (size_t i = 0; i < rib_count; ++i)
+        {
+            ribs.emplace_back(phase + spacing * static_cast<double>(i), (i % 2 == 0) ? 1.0 : -1.0);
+        }
+    }
+    else if (tracking != nullptr)
+    {
+        // Fixed-pitch grid: when the branch grows or shrinks, teeth only appear or disappear at
+        // the ends while all other teeth stay in place.
+        const double pitch = static_cast<double>(line_distance);
+        const double fallback = (s_begin + s_end) / 2.0 + pitch / 2.0; // fresh branch: center the grid
+        const double phase = chooseTrackedPhase(sampler, tracking, pitch, fallback);
+        const double margin = 0.25 * pitch; // keep the rib feet away from the cut edges
+        const int64_t k_first = static_cast<int64_t>(std::ceil((s_begin + margin - phase) / pitch));
+        const int64_t k_last = static_cast<int64_t>(std::floor((s_end - margin - phase) / pitch));
+        for (int64_t k = k_first; k <= k_last; ++k)
+        {
+            ribs.emplace_back(phase + pitch * static_cast<double>(k), ((k % 2) + 2) % 2 == 0 ? 1.0 : -1.0);
+        }
     }
     else
     {
-        rib_count = std::max<size_t>(2, static_cast<size_t>(std::llround(span / line_distance)));
-        spacing = span / static_cast<double>(rib_count);
+        const size_t rib_count = std::max<size_t>(2, static_cast<size_t>(std::llround(span / line_distance)));
+        const double spacing = span / static_cast<double>(rib_count);
+        for (size_t i = 0; i < rib_count; ++i)
+        {
+            ribs.emplace_back(s_begin + spacing * (static_cast<double>(i) + 0.5), (i % 2 == 0) ? 1.0 : -1.0);
+        }
     }
 
     std::vector<Point2LL> wave_points;
@@ -471,12 +605,10 @@ OpenLinesSet buildRibWave(const PathSampler& sampler, const double s_begin, cons
         wave_points.clear();
     };
 
-    for (size_t i = 0; i < rib_count; ++i)
+    for (const auto& [s, side] : ribs)
     {
-        const double s = closed ? s_begin + spacing * static_cast<double>(i) : s_begin + spacing * (static_cast<double>(i) + 0.5);
         const Point2LL p = sampler.at(s);
         const Vec2d tangent = sampler.tangentAt(s);
-        const double side = (i % 2 == 0) ? 1.0 : -1.0;
         const Vec2d normal{ -tangent.y * side, tangent.x * side };
 
         if (! region.inside(p, true))
@@ -487,6 +619,11 @@ OpenLinesSet buildRibWave(const PathSampler& sampler, const double s_begin, cons
         const double wall = wallDistance(region, p, normal, ray_length);
         const double apex_distance = std::max(0.0, wall - static_cast<double>(tip_inset));
         wave_points.push_back(roundedPoint(p.X + normal.x * apex_distance, p.Y + normal.y * apex_distance));
+
+        if (tracking != nullptr && tracking->current != nullptr)
+        {
+            tracking->current->push_back({ p, normal });
+        }
     }
 
     if (closed && wave_points.size() >= 3)
@@ -525,7 +662,7 @@ Polygon cutBand(const Shape& region, const Point2LL& p, const Vec2d& tangent, co
 // - run one wave along the skeleton of each limb,
 // - fill the junction patches with a separate small straight wave.
 // Returns an empty set when the skeleton degenerates (caller falls back to the straight wave).
-OpenLinesSet buildSkeletonWaves(const SingleShape& part, const coord_t line_distance)
+OpenLinesSet buildSkeletonWaves(const SingleShape& part, const coord_t line_distance, const TrackingContext* tracking = nullptr)
 {
     OpenLinesSet waves;
 
@@ -668,7 +805,7 @@ OpenLinesSet buildSkeletonWaves(const SingleShape& part, const coord_t line_dist
             continue; // limb collapsed into a patch after cutting; the patch fill covers it
         }
 
-        waves.push_back(buildRibWave(plan.sampler, plan.s_begin, plan.s_end, branch.closed, sub_parts[part_idx], line_distance, ray_length));
+        waves.push_back(buildRibWave(plan.sampler, plan.s_begin, plan.s_end, branch.closed, sub_parts[part_idx], line_distance, ray_length, tracking));
     }
 
     // Finally fill the blocked-off junction patches with their own separate wave.
@@ -756,6 +893,60 @@ void TriangleWaveFillProvider::generate(OpenLinesSet& result_lines, const Shape&
     outline.applyMatrix(rotation_matrix_);
 
     result_lines = clipWave(template_wave_, outline, rotation_matrix_);
+}
+
+TriangleWaveTrackingProvider::TriangleWaveTrackingProvider(const std::vector<Shape>& layer_outlines, coord_t line_distance, const double fill_angle)
+    : rotation_matrix_(fill_angle)
+{
+    if (line_distance <= 0)
+    {
+        return;
+    }
+
+    layer_waves_.resize(layer_outlines.size());
+
+    // Build the layers bottom up: the teeth of every layer inherit their grid phase and parity
+    // from the teeth of the layer below, so the pattern follows a drifting model while staying
+    // in contact between consecutive layers.
+    std::vector<ToothRecord> previous_teeth;
+    for (size_t layer_idx = 0; layer_idx < layer_outlines.size(); ++layer_idx)
+    {
+        Shape rotated = layer_outlines[layer_idx];
+        rotated.applyMatrix(rotation_matrix_);
+        rotated = rotated.unionPolygons();
+
+        std::vector<ToothRecord> current_teeth;
+        TrackingContext tracking{ layer_idx > 0 ? &previous_teeth : nullptr, &current_teeth };
+
+        OpenLinesSet waves;
+        for (const SingleShape& part : rotated.splitIntoParts())
+        {
+            OpenLinesSet part_waves = buildSkeletonWaves(part, line_distance, &tracking);
+            if (part_waves.empty())
+            {
+                // No usable skeleton: the straight wave lies on an absolute grid, which is
+                // consistent across layers by construction.
+                part_waves = buildStraightWave(part, line_distance);
+            }
+            waves.push_back(part_waves);
+        }
+
+        layer_waves_[layer_idx] = std::move(waves);
+        previous_teeth = std::move(current_teeth);
+    }
+}
+
+void TriangleWaveTrackingProvider::generate(OpenLinesSet& result_lines, const Shape& in_outline, size_t layer_idx) const
+{
+    if (layer_idx >= layer_waves_.size() || layer_waves_[layer_idx].empty() || in_outline.empty())
+    {
+        return;
+    }
+
+    Shape outline = in_outline;
+    outline.applyMatrix(rotation_matrix_);
+
+    result_lines = clipWave(layer_waves_[layer_idx], outline, rotation_matrix_);
 }
 
 void TriangleWaveInfill::generateTotalTriangleWaveInfill(OpenLinesSet& result_lines, coord_t line_distance, const Shape& in_outline, const double fill_angle)

@@ -58,6 +58,47 @@ private:
     OpenLinesSet template_wave_; // the fixed wave, in the rotated coordinate frame
 };
 
+/*!
+ * Pre-computed, per-layer waves for the tracking ("advanced") triangle wave infill pattern.
+ *
+ * This variant is meant for models whose outline drifts sideways from layer to layer (leaning or
+ * twisting shapes), where one fixed model-global template cannot follow the geometry. Instead the
+ * waves are generated layer by layer, bottom up:
+ *
+ *  - The first layer gets a fresh skeleton-driven wave.
+ *  - On every next layer the wave is regenerated from that layer's own skeleton (so the teeth
+ *    always span the current walls with sharp apexes), but the free parameters of the tooth grid
+ *    - the phase along the skeleton and the left/right alternation parity - are inherited from
+ *    the layer below: the previous layer's tooth feet vote for the phase and parity which puts
+ *    the new teeth directly on top of them.
+ *
+ * Because the tooth pitch is fixed and only the phase is carried over, teeth only shift by as
+ * much as the model itself drifts per layer, which keeps consecutive layers in contact.
+ */
+class TriangleWaveTrackingProvider
+{
+public:
+    /*!
+     * Sequentially build the waves of all layers, bottom up.
+     * \param layer_outlines The infill areas of all layers (and all their parts).
+     * \param line_distance Horizontal distance between two successive flanks of the wave.
+     * \param fill_angle The angle (in degrees) used for regions where no skeleton is available.
+     */
+    TriangleWaveTrackingProvider(const std::vector<Shape>& layer_outlines, coord_t line_distance, const double fill_angle);
+
+    /*!
+     * Clip the pre-computed wave of one layer to the actual infill outline.
+     * \param result_lines Output variable to store the resulting polylines in.
+     * \param in_outline The infill area of this layer.
+     * \param layer_idx The layer number, indexing the outlines given to the constructor.
+     */
+    void generate(OpenLinesSet& result_lines, const Shape& in_outline, size_t layer_idx) const;
+
+private:
+    PointMatrix rotation_matrix_;
+    std::vector<OpenLinesSet> layer_waves_; // one pre-computed wave per layer, in the rotated coordinate frame
+};
+
 class TriangleWaveInfill
 {
 public:

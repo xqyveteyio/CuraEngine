@@ -32,6 +32,7 @@ class Mesh;
 class SierpinskiFillProvider;
 class LightningGenerator;
 class TriangleWaveFillProvider;
+class TriangleWaveTrackingProvider;
 class PrimeTower;
 
 /*!
@@ -326,6 +327,8 @@ public:
     std::shared_ptr<LightningGenerator> lightning_generator; //!< Pre-computed structure for Lightning type infill
 
     std::shared_ptr<TriangleWaveFillProvider> triangle_wave_fill_provider; //!< Pre-computed model-global template for the triangle wave infill pattern
+
+    std::shared_ptr<TriangleWaveTrackingProvider> triangle_wave_tracking_provider; //!< Pre-computed per-layer waves for the tracking triangle wave infill pattern
 
     RetractionAndWipeConfig retraction_wipe_config; //!< Per-Object retraction and wipe settings.
 

@@ -431,6 +431,8 @@ EFillMethod Settings::get<EFillMethod>(const std::string& key) const
         return EFillMethod::GYROID;
     case "triangle_wave"_sw:
         return EFillMethod::TRIANGLE_WAVE;
+    case "triangle_wave_tracking"_sw:
+        return EFillMethod::TRIANGLE_WAVE_TRACKING;
     case "lightning"_sw:
         return EFillMethod::LIGHTNING;
     case "plugin"_sw:

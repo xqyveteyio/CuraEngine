@@ -703,9 +703,10 @@ void FffPolygonGenerator::processDerivedWallsSkinInfill(SliceMeshStorage& mesh)
         mesh.lightning_generator = std::make_shared<LightningGenerator>(mesh);
     }
 
-    // Pre-compute the model-global template wave for the triangle wave infill pattern, so that
-    // the wave flanks are exactly aligned between the layers and stack up into continuous walls.
-    if (mesh.settings.get<coord_t>("infill_line_distance") > 0 && mesh.settings.get<EFillMethod>("infill_pattern") == EFillMethod::TRIANGLE_WAVE)
+    // Pre-compute the cross-layer data for the triangle wave infill patterns.
+    const EFillMethod mesh_infill_pattern = mesh.settings.get<EFillMethod>("infill_pattern");
+    if (mesh.settings.get<coord_t>("infill_line_distance") > 0
+        && (mesh_infill_pattern == EFillMethod::TRIANGLE_WAVE || mesh_infill_pattern == EFillMethod::TRIANGLE_WAVE_TRACKING))
     {
         std::vector<Shape> layer_infill_areas;
         layer_infill_areas.reserve(mesh.layers.size());
@@ -724,8 +725,19 @@ void FffPolygonGenerator::processDerivedWallsSkinInfill(SliceMeshStorage& mesh)
         const std::vector<AngleDegrees> infill_angles = mesh.settings.get<std::vector<AngleDegrees>>("infill_angles");
         const AngleDegrees fill_angle = infill_angles.empty() ? AngleDegrees(45) : infill_angles.front();
 
-        mesh.triangle_wave_fill_provider
-            = std::make_shared<TriangleWaveFillProvider>(layer_infill_areas, mesh.settings.get<coord_t>("infill_line_distance"), fill_angle);
+        if (mesh_infill_pattern == EFillMethod::TRIANGLE_WAVE)
+        {
+            // One model-global template wave, so that the flanks are exactly aligned between layers.
+            mesh.triangle_wave_fill_provider
+                = std::make_shared<TriangleWaveFillProvider>(layer_infill_areas, mesh.settings.get<coord_t>("infill_line_distance"), fill_angle);
+        }
+        else
+        {
+            // Per-layer waves with the tooth grid phase locked onto the layer below, for models
+            // whose outline drifts from layer to layer.
+            mesh.triangle_wave_tracking_provider
+                = std::make_shared<TriangleWaveTrackingProvider>(layer_infill_areas, mesh.settings.get<coord_t>("infill_line_distance"), fill_angle);
+        }
     }
 
     // combine infill

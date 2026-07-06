@@ -206,7 +206,7 @@ std::vector<InfillTestParameters> generateInfillTests()
      */
     std::vector<EFillMethod> skip_methods
         = { EFillMethod::CONCENTRIC, EFillMethod::ZIG_ZAG,        EFillMethod::CROSS,  EFillMethod::CROSS_3D,
-            EFillMethod::CUBICSUBDIV, EFillMethod::TRIANGLE_WAVE, EFillMethod::GYROID, EFillMethod::LIGHTNING };
+            EFillMethod::CUBICSUBDIV, EFillMethod::TRIANGLE_WAVE, EFillMethod::TRIANGLE_WAVE_TRACKING, EFillMethod::GYROID, EFillMethod::LIGHTNING };
 
     std::vector<EFillMethod> methods;
     for (int i_method = 0; i_method < static_cast<int>(EFillMethod::NONE); ++i_method)
