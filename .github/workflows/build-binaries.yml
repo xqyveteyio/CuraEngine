@@ -1,0 +1,97 @@
+name: build-binaries
+
+# Builds standalone CuraEngine binaries for Windows (MSVC) and Linux (GCC).
+#
+# By default Arcus and the plugin system are enabled, so the resulting binary can be dropped into
+# a Cura desktop installation (it replaces the shipped CuraEngine[.exe]). Trigger the workflow
+# manually with enable_arcus=false to get the leaner CLI-only build used for command line slicing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      enable_arcus:
+        description: 'Enable Arcus/plugins (required for use inside the Cura desktop app)'
+        required: false
+        default: true
+        type: boolean
+  push:
+    paths:
+      - 'include/**'
+      - 'src/**'
+      - 'conanfile.py'
+      - 'conandata.yml'
+      - 'CMakeLists.txt'
+      - '.github/workflows/build-binaries.yml'
+    branches:
+      - add_triangle_wave_infill_epic
+
+env:
+  # 'true' unless manually dispatched with enable_arcus=false
+  ENABLE_ARCUS: ${{ github.event_name == 'workflow_dispatch' && (inputs.enable_arcus && 'true' || 'false') || 'true' }}
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-24.04
+          - name: windows-x64
+            os: windows-2022
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # conanfile export records the git commit
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Conan
+        run: pip install "conan~=2.30"
+
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2/p
+          key: conan-${{ matrix.name }}-arcus_${{ env.ENABLE_ARCUS }}-${{ hashFiles('conanfile.py', 'conandata.yml') }}
+          restore-keys: |
+            conan-${{ matrix.name }}-arcus_${{ env.ENABLE_ARCUS }}-
+            conan-${{ matrix.name }}-
+
+      - name: Configure Conan (UltiMaker public remotes + default profile)
+        run: |
+          conan config install https://github.com/ultimaker/conan-config.git
+          conan profile detect --force
+        shell: bash
+
+      - name: Build CuraEngine
+        run: >
+          conan build .
+          -o "&:enable_arcus=${{ env.ENABLE_ARCUS == 'true' && 'True' || 'False' }}"
+          -o "&:enable_plugins=${{ env.ENABLE_ARCUS == 'true' && 'True' || 'False' }}"
+          -s compiler.cppstd=20
+          -c tools.build:skip_test=True
+          --build=missing
+        shell: bash
+
+      - name: Collect binaries
+        run: |
+          mkdir -p dist
+          # The executable plus any shared libraries it needs (e.g. Arcus) end up in the build folder.
+          find build -maxdepth 3 \( -name 'CuraEngine' -o -name 'CuraEngine.exe' -o -name '*.dll' -o -name '*.so*' \) -type f -exec cp -v {} dist/ \;
+          ls -la dist
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CuraEngine-${{ matrix.name }}${{ env.ENABLE_ARCUS == 'false' && '-cli' || '' }}
+          path: dist/
+          if-no-files-found: error
