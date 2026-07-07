@@ -62,18 +62,21 @@ private:
  * Pre-computed, per-layer waves for the tracking ("advanced") triangle wave infill pattern.
  *
  * This variant is meant for models whose outline drifts sideways from layer to layer (leaning or
- * twisting shapes), where one fixed model-global template cannot follow the geometry. Instead the
- * waves are generated layer by layer, bottom up:
+ * twisting shapes), where one fixed model-global template cannot follow the geometry. Only the
+ * first layer (and parts newly appearing on higher layers) runs the full skeleton-driven
+ * generation; every other layer is DERIVED tooth by tooth from the layer below, changing as
+ * little as possible:
  *
- *  - The first layer gets a fresh skeleton-driven wave.
- *  - On every next layer the wave is regenerated from that layer's own skeleton (so the teeth
- *    always span the current walls with sharp apexes), but the free parameters of the tooth grid
- *    - the phase along the skeleton and the left/right alternation parity - are inherited from
- *    the layer below: the previous layer's tooth feet vote for the phase and parity which puts
- *    the new teeth directly on top of them.
+ *  - Each tooth keeps its rib line (position and direction); only the tooth length is re-cut
+ *    against the current outline, so teeth follow walls that moved and stay put everywhere else.
+ *  - A wall end that suddenly disappears (e.g. the rib now looks through into another corridor)
+ *    freezes the tooth instead of letting it jump there.
+ *  - Teeth are added only where region newly appeared (at chain ends or in grown gaps), and
+ *    removed only where their material vanished.
  *
- * Because the tooth pitch is fixed and only the phase is carried over, teeth only shift by as
- * much as the model itself drifts per layer, which keeps consecutive layers in contact.
+ * Identical outlines therefore produce identical waves, and the layer-to-layer difference of the
+ * infill is bounded by the layer-to-layer difference of the model itself, which keeps
+ * consecutive layers in contact.
  */
 class TriangleWaveTrackingProvider
 {

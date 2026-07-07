@@ -5,9 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 #include <map>
-#include <numbers>
 #include <set>
 
 #include "BoostInterface.hpp" // needed for the boost voronoi traits of PolygonsSegmentIndex
@@ -70,51 +68,18 @@ void gatherColumnExtremes(const Shape& outline, const coord_t line_distance, std
     }
 }
 
-// Draw the complete triangle wave through the column extremes: troughs at even columns, peaks at
-// odd columns, with sharp apexes touching the (template) boundary. Columns without material
-// interrupt the wave.
-OpenLinesSet buildWave(const std::map<int64_t, std::pair<coord_t, coord_t>>& extremes, const coord_t line_distance)
-{
-    OpenLinesSet wave;
-    if (extremes.empty())
-    {
-        return wave;
-    }
-
-    std::vector<Point2LL> wave_points;
-    auto flush_wave = [&wave, &wave_points]()
-    {
-        if (wave_points.size() >= 2)
-        {
-            wave.push_back(OpenPolyline{ wave_points });
-        }
-        wave_points.clear();
-    };
-
-    for (int64_t k = extremes.begin()->first; k <= extremes.rbegin()->first; ++k)
-    {
-        const auto it = extremes.find(k);
-        if (it == extremes.end())
-        {
-            flush_wave();
-            continue;
-        }
-        const bool is_peak = (((k % 2) + 2) % 2) == 1; // globally consistent up/down parity
-        const coord_t apex_y = is_peak ? it->second.second - tip_inset : it->second.first + tip_inset;
-        wave_points.emplace_back(columnX(k, line_distance), apex_y);
-    }
-    flush_wave();
-
-    return wave;
-}
+// (Definitions live in the tracking section further down; declared here because the straight
+// wave builder can also record its teeth as chains for the tracking mode.)
+struct ToothChain;
+OpenLinesSet buildWave(const std::map<int64_t, std::pair<coord_t, coord_t>>& extremes, const coord_t line_distance, std::vector<ToothChain>* chains_out);
 
 // Straight axis-aligned triangle wave over the given region (used as fallback for regions without
 // a usable skeleton, and to fill the junction patches).
-OpenLinesSet buildStraightWave(const Shape& region, const coord_t line_distance)
+OpenLinesSet buildStraightWave(const Shape& region, const coord_t line_distance, std::vector<ToothChain>* chains_out = nullptr)
 {
     std::map<int64_t, std::pair<coord_t, coord_t>> extremes;
     gatherColumnExtremes(region, line_distance, extremes);
-    return buildWave(extremes, line_distance);
+    return buildWave(extremes, line_distance, chains_out);
 }
 
 // ================================ medial axis (skeleton) extraction ================================
@@ -353,46 +318,78 @@ Point2LL roundedPoint(const double x, const double y)
     return { std::llrint(x), std::llrint(y) };
 }
 
-// One tooth of a generated wave; the next layer inherits its grid phase and parity from these.
-struct ToothRecord
+// One tooth of a tracked wave. The tooth is defined by its rib: the line through 'foot' along
+// 'dir'. The apex (the wave vertex) lies on that line towards dir * side, the base is the chord
+// end on the opposite wall. In tracking mode each layer derives its teeth 1:1 from the layer
+// below: the rib line stays where it is, only the chord against the current outline is re-cut.
+struct TrackedTooth
 {
-    Point2LL foot; // the rib foot on the skeleton (in the rotated frame)
-    Vec2d apex_direction; // unit normal from the foot towards the apex
+    Point2LL foot; // center of the rib chord (in the rotated frame)
+    Vec2d dir; // unit rib direction (unsigned)
+    double side; // the apex lies along dir * side
+    Point2LL apex; // the wave vertex (wall minus tip inset)
+    Point2LL base; // the opposite chord end
 };
 
-// Tracking mode: the teeth of the layer below vote for the phase/parity of this layer's teeth,
-// and the teeth generated on this layer are recorded for the layer above.
-struct TrackingContext
+// An ordered run of alternating teeth; the wave polyline connects the apexes in order.
+struct ToothChain
 {
-    const std::vector<ToothRecord>* previous;
-    std::vector<ToothRecord>* current;
+    std::vector<TrackedTooth> teeth;
+    bool closed{ false };
 };
 
-// Average cyclic votes (e.g. phases modulo a tooth period) via the circular mean. Returns the
-// fallback (normalized into [0, period)) when there are no votes.
-double circularVote(const std::vector<double>& votes, const double period, const double fallback)
+// Draw the complete triangle wave through the column extremes: troughs at even columns, peaks at
+// odd columns, with sharp apexes touching the (template) boundary. Columns without material
+// interrupt the wave. When \p chains_out is given, the teeth are recorded for the tracking mode.
+OpenLinesSet buildWave(const std::map<int64_t, std::pair<coord_t, coord_t>>& extremes, const coord_t line_distance, std::vector<ToothChain>* chains_out)
 {
-    auto normalized = [period](const double v)
+    OpenLinesSet wave;
+    if (extremes.empty())
     {
-        return std::fmod(std::fmod(v, period) + period, period);
+        return wave;
+    }
+
+    std::vector<Point2LL> wave_points;
+    ToothChain chain;
+    auto flush_wave = [&]()
+    {
+        if (wave_points.size() >= 2)
+        {
+            wave.push_back(OpenPolyline{ wave_points });
+        }
+        wave_points.clear();
+        if (chains_out != nullptr && chain.teeth.size() >= 2)
+        {
+            chains_out->push_back(chain);
+        }
+        chain = ToothChain{};
     };
-    if (votes.empty())
+
+    for (int64_t k = extremes.begin()->first; k <= extremes.rbegin()->first; ++k)
     {
-        return normalized(fallback);
+        const auto it = extremes.find(k);
+        if (it == extremes.end())
+        {
+            flush_wave();
+            continue;
+        }
+        const bool is_peak = (((k % 2) + 2) % 2) == 1; // globally consistent up/down parity
+        const coord_t x = columnX(k, line_distance);
+        const coord_t apex_y = is_peak ? it->second.second - tip_inset : it->second.first + tip_inset;
+        wave_points.emplace_back(x, apex_y);
+
+        if (chains_out != nullptr)
+        {
+            const coord_t base_y = is_peak ? it->second.first + tip_inset : it->second.second - tip_inset;
+            const Point2LL apex(x, apex_y);
+            const Point2LL base(x, base_y);
+            const Point2LL foot(x, (apex_y + base_y) / 2);
+            chain.teeth.push_back({ foot, Vec2d{ 0.0, 1.0 }, is_peak ? 1.0 : -1.0, apex, base });
+        }
     }
-    double sum_x = 0.0;
-    double sum_y = 0.0;
-    for (const double vote : votes)
-    {
-        const double angle = 2.0 * std::numbers::pi * vote / period;
-        sum_x += std::cos(angle);
-        sum_y += std::sin(angle);
-    }
-    if (sum_x == 0.0 && sum_y == 0.0)
-    {
-        return normalized(fallback);
-    }
-    return normalized(std::atan2(sum_y, sum_x) / (2.0 * std::numbers::pi) * period);
+    flush_wave();
+
+    return wave;
 }
 
 // Arc-length parametrization of a branch polyline, with linear interpolation and central
@@ -454,34 +451,6 @@ public:
         return { dx / len, dy / len };
     }
 
-    // Arc position of the point on the path closest to q, plus the distance to it.
-    double closestArcPosition(const Point2LL& q, double& distance_out) const
-    {
-        double best_s = 0.0;
-        double best_d2 = std::numeric_limits<double>::max();
-        const size_t segment_count = closed_ ? points_.size() : points_.size() - 1;
-        for (size_t i = 0; i < segment_count; ++i)
-        {
-            const Point2LL& a = points_[i];
-            const Point2LL& b = points_[(i + 1) % points_.size()];
-            const double abx = static_cast<double>(b.X - a.X);
-            const double aby = static_cast<double>(b.Y - a.Y);
-            const double len2 = abx * abx + aby * aby;
-            double t = (len2 > 0.0) ? ((q.X - a.X) * abx + (q.Y - a.Y) * aby) / len2 : 0.0;
-            t = std::clamp(t, 0.0, 1.0);
-            const double px = a.X + abx * t;
-            const double py = a.Y + aby * t;
-            const double d2 = (q.X - px) * (q.X - px) + (q.Y - py) * (q.Y - py);
-            if (d2 < best_d2)
-            {
-                best_d2 = d2;
-                best_s = cumulative_[i] + std::sqrt(len2) * t;
-            }
-        }
-        distance_out = std::sqrt(best_d2);
-        return best_s;
-    }
-
 private:
     std::vector<Point2LL> points_;
     bool closed_;
@@ -507,39 +476,11 @@ double wallDistance(const Shape& region, const Point2LL& p, const Vec2d& directi
     return found ? nearest * ray_length : ray_length;
 }
 
-// In tracking mode: let the teeth of the layer below vote for the phase of this branch's tooth
-// grid. Every previous tooth close enough to this skeleton path projects onto it; the projection
-// is shifted by one grid unit when the tooth points to the "other" side, so that phase AND
-// left/right parity are voted for together (the full pattern period is two grid units).
-double chooseTrackedPhase(const PathSampler& sampler, const TrackingContext* tracking, const double period_unit, const double fallback)
-{
-    std::vector<double> votes;
-    if (tracking != nullptr && tracking->previous != nullptr)
-    {
-        for (const ToothRecord& tooth : *tracking->previous)
-        {
-            double distance = 0.0;
-            const double s = sampler.closestArcPosition(tooth.foot, distance);
-            if (distance > 0.75 * period_unit)
-            {
-                continue; // this tooth belongs to another limb / corridor
-            }
-            const Vec2d tangent = sampler.tangentAt(s);
-            const Vec2d normal{ -tangent.y, tangent.x };
-            const double side_dot = normal.x * tooth.apex_direction.x + normal.y * tooth.apex_direction.y;
-            votes.push_back(s - ((side_dot >= 0.0) ? 0.0 : period_unit));
-        }
-    }
-    return circularVote(votes, 2.0 * period_unit, fallback);
-}
-
 // Build the triangle wave for one limb, putting the apexes alternately on the left and right
-// wall, perpendicular to the local skeleton direction.
-//
-// Without tracking, the rib positions are distributed evenly (with a spacing close to the
-// requested line distance) over the skeleton path. With tracking, the ribs lie on a fixed-pitch
-// grid whose phase and parity follow the teeth of the layer below, so that teeth only move as
-// much as the model itself drifts per layer; the generated teeth are recorded for the next layer.
+// wall, perpendicular to the local skeleton direction. The rib positions are distributed evenly
+// (with a spacing close to the requested line distance) over the skeleton path. When \p
+// chains_out is given, the teeth are also recorded as chains for the tracking mode: the next
+// layer then derives its teeth from these instead of regenerating.
 OpenLinesSet buildRibWave(
     const PathSampler& sampler,
     const double s_begin,
@@ -548,7 +489,7 @@ OpenLinesSet buildRibWave(
     const Shape& region,
     const coord_t line_distance,
     const double ray_length,
-    const TrackingContext* tracking)
+    std::vector<ToothChain>* chains_out)
 {
     OpenLinesSet wave;
     const double span = closed ? sampler.length() : s_end - s_begin;
@@ -564,25 +505,9 @@ OpenLinesSet buildRibWave(
         // A closed loop needs an even tooth count for the alternating wave to close onto itself.
         const size_t rib_count = 2 * std::max<size_t>(1, static_cast<size_t>(std::llround(span / (2.0 * line_distance))));
         const double spacing = span / static_cast<double>(rib_count);
-        const double phase = (tracking != nullptr) ? chooseTrackedPhase(sampler, tracking, spacing, 0.0) : 0.0;
         for (size_t i = 0; i < rib_count; ++i)
         {
-            ribs.emplace_back(phase + spacing * static_cast<double>(i), (i % 2 == 0) ? 1.0 : -1.0);
-        }
-    }
-    else if (tracking != nullptr)
-    {
-        // Fixed-pitch grid: when the branch grows or shrinks, teeth only appear or disappear at
-        // the ends while all other teeth stay in place.
-        const double pitch = static_cast<double>(line_distance);
-        const double fallback = (s_begin + s_end) / 2.0 + pitch / 2.0; // fresh branch: center the grid
-        const double phase = chooseTrackedPhase(sampler, tracking, pitch, fallback);
-        const double margin = 0.25 * pitch; // keep the rib feet away from the cut edges
-        const int64_t k_first = static_cast<int64_t>(std::ceil((s_begin + margin - phase) / pitch));
-        const int64_t k_last = static_cast<int64_t>(std::floor((s_end - margin - phase) / pitch));
-        for (int64_t k = k_first; k <= k_last; ++k)
-        {
-            ribs.emplace_back(phase + pitch * static_cast<double>(k), ((k % 2) + 2) % 2 == 0 ? 1.0 : -1.0);
+            ribs.emplace_back(spacing * static_cast<double>(i), (i % 2 == 0) ? 1.0 : -1.0);
         }
     }
     else
@@ -596,39 +521,57 @@ OpenLinesSet buildRibWave(
     }
 
     std::vector<Point2LL> wave_points;
-    auto flush_wave = [&wave, &wave_points]()
+    ToothChain chain;
+    bool interrupted = false;
+    auto flush_wave = [&]()
     {
         if (wave_points.size() >= 2)
         {
             wave.push_back(OpenPolyline{ wave_points });
         }
         wave_points.clear();
+        if (chains_out != nullptr && chain.teeth.size() >= 2)
+        {
+            chains_out->push_back(chain);
+        }
+        chain = ToothChain{};
     };
 
     for (const auto& [s, side] : ribs)
     {
         const Point2LL p = sampler.at(s);
         const Vec2d tangent = sampler.tangentAt(s);
-        const Vec2d normal{ -tangent.y * side, tangent.x * side };
+        const Vec2d normal{ -tangent.y, tangent.x };
+        const Vec2d apex_dir{ normal.x * side, normal.y * side };
 
         if (! region.inside(p, true))
         {
             flush_wave(); // rib foot outside the limb (sharp curvature artifact): interrupt the wave
+            interrupted = true;
             continue;
         }
-        const double wall = wallDistance(region, p, normal, ray_length);
-        const double apex_distance = std::max(0.0, wall - static_cast<double>(tip_inset));
-        wave_points.push_back(roundedPoint(p.X + normal.x * apex_distance, p.Y + normal.y * apex_distance));
+        const double apex_wall = wallDistance(region, p, apex_dir, ray_length);
+        const double apex_distance = std::max(0.0, apex_wall - static_cast<double>(tip_inset));
+        const Point2LL apex = roundedPoint(p.X + apex_dir.x * apex_distance, p.Y + apex_dir.y * apex_distance);
+        wave_points.push_back(apex);
 
-        if (tracking != nullptr && tracking->current != nullptr)
+        if (chains_out != nullptr)
         {
-            tracking->current->push_back({ p, normal });
+            const double base_wall = wallDistance(region, p, { -apex_dir.x, -apex_dir.y }, ray_length);
+            const double base_distance = std::max(0.0, base_wall - static_cast<double>(tip_inset));
+            const Point2LL base = roundedPoint(p.X - apex_dir.x * base_distance, p.Y - apex_dir.y * base_distance);
+            const Point2LL foot = roundedPoint((apex.X + base.X) / 2.0, (apex.Y + base.Y) / 2.0);
+            chain.teeth.push_back({ foot, normal, side, apex, base });
         }
     }
 
     if (closed && wave_points.size() >= 3)
     {
         wave_points.push_back(wave_points.front()); // close the loop
+        if (! interrupted)
+        {
+            chain.closed = true;
+        }
     }
     flush_wave();
 
@@ -662,7 +605,7 @@ Polygon cutBand(const Shape& region, const Point2LL& p, const Vec2d& tangent, co
 // - run one wave along the skeleton of each limb,
 // - fill the junction patches with a separate small straight wave.
 // Returns an empty set when the skeleton degenerates (caller falls back to the straight wave).
-OpenLinesSet buildSkeletonWaves(const SingleShape& part, const coord_t line_distance, const TrackingContext* tracking = nullptr)
+OpenLinesSet buildSkeletonWaves(const SingleShape& part, const coord_t line_distance, std::vector<ToothChain>* chains_out = nullptr)
 {
     OpenLinesSet waves;
 
@@ -805,7 +748,7 @@ OpenLinesSet buildSkeletonWaves(const SingleShape& part, const coord_t line_dist
             continue; // limb collapsed into a patch after cutting; the patch fill covers it
         }
 
-        waves.push_back(buildRibWave(plan.sampler, plan.s_begin, plan.s_end, branch.closed, sub_parts[part_idx], line_distance, ray_length, tracking));
+        waves.push_back(buildRibWave(plan.sampler, plan.s_begin, plan.s_end, branch.closed, sub_parts[part_idx], line_distance, ray_length, chains_out));
     }
 
     // Finally fill the blocked-off junction patches with their own separate wave.
@@ -813,10 +756,405 @@ OpenLinesSet buildSkeletonWaves(const SingleShape& part, const coord_t line_dist
     {
         if (is_patch[i])
         {
-            waves.push_back(buildStraightWave(sub_parts[i], line_distance));
+            waves.push_back(buildStraightWave(sub_parts[i], line_distance, chains_out));
         }
     }
 
+    return waves;
+}
+
+// ================================ tracking: per-tooth derivation ================================
+
+// The maximal interval of the rib line inside the region, as signed distances from the foot
+// (positive towards dir). When the line crosses the region several times (holes, other
+// corridors), the interval closest to the foot is chosen; 'valid' is false when there is none
+// within max_foot_distance.
+struct RibChord
+{
+    double s_low{ 0.0 };
+    double s_high{ 0.0 };
+    bool valid{ false };
+};
+
+RibChord ribChordNear(const Shape& region, const Point2LL& foot, const Vec2d& dir, const double ray_length, const double max_foot_distance)
+{
+    const Point2LL p1 = roundedPoint(foot.X - dir.x * ray_length, foot.Y - dir.y * ray_length);
+    const Point2LL p2 = roundedPoint(foot.X + dir.x * ray_length, foot.Y + dir.y * ray_length);
+    std::vector<float> ts = region.intersectionsWithSegment(p1, p2);
+    if (ts.size() < 2 || ts.size() % 2 != 0)
+    {
+        return {}; // degenerate (tangential) crossing; report failure so the tooth freezes
+    }
+    std::sort(ts.begin(), ts.end());
+
+    RibChord best;
+    double best_distance = max_foot_distance;
+    for (size_t i = 0; i + 1 < ts.size(); i += 2) // p1 lies far outside, so the even intervals are the inside ones
+    {
+        const double s_low = (static_cast<double>(ts[i]) - 0.5) * 2.0 * ray_length;
+        const double s_high = (static_cast<double>(ts[i + 1]) - 0.5) * 2.0 * ray_length;
+        const double distance = (s_low > 0.0) ? s_low : ((s_high < 0.0) ? -s_high : 0.0);
+        if (distance < best_distance)
+        {
+            best_distance = distance;
+            best = { s_low, s_high, true };
+        }
+    }
+    return best;
+}
+
+// Derive one tooth from its previous-layer state: the rib line stays where it is, only the chord
+// against the current outline is re-cut and both ends follow their wall. An end chases a receding
+// wall without limit only while the movement per layer stays small; when the wall suddenly
+// vanishes (e.g. the rib now looks through a junction opening into another corridor), the end
+// freezes in place instead of jumping there. Walls moving inwards are always followed exactly.
+// Returns false when the tooth has no material left to live in.
+bool updateTooth(TrackedTooth& tooth, const Shape& region, const coord_t line_distance, const double ray_length)
+{
+    const RibChord chord = ribChordNear(region, tooth.foot, tooth.dir, ray_length, static_cast<double>(line_distance));
+    if (! chord.valid)
+    {
+        return region.inside(tooth.foot, true); // freeze entirely, or die when the material is gone
+    }
+    if (chord.s_high - chord.s_low < 4.0 * tip_inset)
+    {
+        return false; // sliver, too narrow to hold a tooth
+    }
+
+    const double jump_threshold = static_cast<double>(line_distance) / 2.0;
+    const Vec2d apex_dir{ tooth.dir.x * tooth.side, tooth.dir.y * tooth.side };
+
+    // Work in signed distances from the foot: 'a' towards the apex wall, 'b' towards the base wall.
+    const double a_wall = (tooth.side > 0.0) ? chord.s_high : -chord.s_low;
+    const double b_wall = (tooth.side > 0.0) ? -chord.s_low : chord.s_high;
+
+    auto derive_end = [jump_threshold](const double candidate, const double previous, const double other_wall_limit)
+    {
+        double result = candidate;
+        if (candidate - previous > jump_threshold)
+        {
+            result = previous; // wall vanished: freeze instead of chasing it
+        }
+        return std::clamp(result, -other_wall_limit, candidate);
+    };
+
+    const double a_prev = (tooth.apex.X - tooth.foot.X) * apex_dir.x + (tooth.apex.Y - tooth.foot.Y) * apex_dir.y;
+    const double b_prev = -((tooth.base.X - tooth.foot.X) * apex_dir.x + (tooth.base.Y - tooth.foot.Y) * apex_dir.y);
+    const double a_new = derive_end(a_wall - tip_inset, a_prev, b_wall - tip_inset);
+    const double b_new = derive_end(b_wall - tip_inset, b_prev, a_wall - tip_inset);
+
+    tooth.apex = roundedPoint(tooth.foot.X + apex_dir.x * a_new, tooth.foot.Y + apex_dir.y * a_new);
+    tooth.base = roundedPoint(tooth.foot.X - apex_dir.x * b_new, tooth.foot.Y - apex_dir.y * b_new);
+    tooth.foot = roundedPoint((tooth.apex.X + tooth.base.X) / 2.0, (tooth.apex.Y + tooth.base.Y) / 2.0);
+    return true;
+}
+
+// Create a brand new tooth (gap fill or chain extension) at the given foot/dir/side.
+bool makeTooth(TrackedTooth& tooth, const Shape& region, const coord_t line_distance, const double ray_length)
+{
+    const RibChord chord = ribChordNear(region, tooth.foot, tooth.dir, ray_length, 0.75 * static_cast<double>(line_distance));
+    if (! chord.valid || chord.s_high - chord.s_low < 4.0 * tip_inset)
+    {
+        return false;
+    }
+    const Vec2d apex_dir{ tooth.dir.x * tooth.side, tooth.dir.y * tooth.side };
+    const double a = ((tooth.side > 0.0) ? chord.s_high : -chord.s_low) - tip_inset;
+    const double b = ((tooth.side > 0.0) ? -chord.s_low : chord.s_high) - tip_inset;
+    tooth.apex = roundedPoint(tooth.foot.X + apex_dir.x * a, tooth.foot.Y + apex_dir.y * a);
+    tooth.base = roundedPoint(tooth.foot.X - apex_dir.x * b, tooth.foot.Y - apex_dir.y * b);
+    tooth.foot = roundedPoint((tooth.apex.X + tooth.base.X) / 2.0, (tooth.apex.Y + tooth.base.Y) / 2.0);
+    return true;
+}
+
+// Drop teeth which break the left/right alternation (this can happen when a tooth in between
+// died); closed chains additionally need an even count for the wave to close onto itself.
+void fixParity(ToothChain& chain)
+{
+    std::vector<TrackedTooth> kept;
+    for (const TrackedTooth& tooth : chain.teeth)
+    {
+        if (kept.empty() || kept.back().side != tooth.side)
+        {
+            kept.push_back(tooth);
+        }
+    }
+    if (chain.closed)
+    {
+        while (kept.size() >= 2 && (kept.size() % 2 != 0 || kept.front().side == kept.back().side))
+        {
+            kept.pop_back();
+        }
+    }
+    chain.teeth = std::move(kept);
+}
+
+// Slowly re-align the rib directions with the run of the chain (perpendicular to the line through
+// the neighboring feet), limited to a small rotation per layer so that a slowly twisting model is
+// followed without ever changing the pattern abruptly.
+void smoothDirections(ToothChain& chain)
+{
+    constexpr double max_rotation = 0.06; // [rad] per layer
+    const size_t n = chain.teeth.size();
+    if (n < 3)
+    {
+        return;
+    }
+    const std::vector<TrackedTooth> before = chain.teeth; // read the tangents from the unmodified state
+    for (size_t i = 0; i < n; ++i)
+    {
+        const TrackedTooth& prev = before[(i == 0) ? (chain.closed ? n - 1 : 0) : i - 1];
+        const TrackedTooth& next = before[(i + 1 >= n) ? (chain.closed ? 0 : n - 1) : i + 1];
+        const double tx = static_cast<double>(next.foot.X - prev.foot.X);
+        const double ty = static_cast<double>(next.foot.Y - prev.foot.Y);
+        const double len = std::hypot(tx, ty);
+        if (len <= 0.0)
+        {
+            continue;
+        }
+        Vec2d target{ -ty / len, tx / len }; // perpendicular to the chain
+        const Vec2d dir = chain.teeth[i].dir;
+        if (target.x * dir.x + target.y * dir.y < 0.0)
+        {
+            target = { -target.x, -target.y }; // keep the sign continuous
+        }
+        const double angle = std::atan2(dir.x * target.y - dir.y * target.x, dir.x * target.x + dir.y * target.y);
+        const double clamped = std::clamp(angle, -max_rotation, max_rotation);
+        const double c = std::cos(clamped);
+        const double s = std::sin(clamped);
+        chain.teeth[i].dir = { dir.x * c - dir.y * s, dir.x * s + dir.y * c };
+    }
+}
+
+// Insert new teeth where the feet of neighboring teeth have moved more than ~1.5 teeth apart
+// (the region grew in the middle of a chain). The number of inserted teeth respects the
+// alternation parity of the two neighbors.
+void fillGaps(ToothChain& chain, const Shape& region, const coord_t line_distance, const double ray_length)
+{
+    const double pitch = static_cast<double>(line_distance);
+    const size_t n = chain.teeth.size();
+    if (n < 2)
+    {
+        return;
+    }
+    std::vector<TrackedTooth> result;
+    const size_t pair_count = chain.closed ? n : n - 1;
+    for (size_t i = 0; i < pair_count; ++i)
+    {
+        const TrackedTooth& current = chain.teeth[i];
+        const TrackedTooth& following = chain.teeth[(i + 1) % n];
+        result.push_back(current);
+
+        const double dx = static_cast<double>(following.foot.X - current.foot.X);
+        const double dy = static_cast<double>(following.foot.Y - current.foot.Y);
+        const double distance = std::hypot(dx, dy);
+        if (distance < 1.6 * pitch)
+        {
+            continue;
+        }
+        int64_t count = std::llround(distance / pitch) - 1;
+        const bool need_even = (current.side != following.side); // normal alternation
+        if ((count % 2 == 0) != need_even)
+        {
+            count += 1;
+        }
+        for (int64_t k = 1; k <= count; ++k)
+        {
+            const double t = static_cast<double>(k) / static_cast<double>(count + 1);
+            Vec2d dir{ current.dir.x + (following.dir.x - current.dir.x) * t, current.dir.y + (following.dir.y - current.dir.y) * t };
+            const double dir_len = std::hypot(dir.x, dir.y);
+            if (dir_len <= 0.0)
+            {
+                continue;
+            }
+            dir = { dir.x / dir_len, dir.y / dir_len };
+            TrackedTooth tooth{ roundedPoint(current.foot.X + dx * t, current.foot.Y + dy * t), dir, (k % 2 == 1) ? -current.side : current.side, {}, {} };
+            if (makeTooth(tooth, region, line_distance, ray_length))
+            {
+                result.push_back(tooth);
+            }
+        }
+    }
+    if (! chain.closed)
+    {
+        result.push_back(chain.teeth.back());
+    }
+    chain.teeth = std::move(result);
+}
+
+// Grow an open chain at its two ends, one pitch at a time, into region which is not covered yet
+// (the model grew at the end of a corridor).
+void extendEnds(ToothChain& chain, const Shape& region, const coord_t line_distance, const double ray_length, std::vector<Point2LL>& all_feet)
+{
+    if (chain.closed || chain.teeth.size() < 2)
+    {
+        return;
+    }
+    const double pitch = static_cast<double>(line_distance);
+    const double near_distance = 0.8 * pitch;
+    auto near_existing = [&all_feet, near_distance](const Point2LL& p)
+    {
+        for (const Point2LL& foot : all_feet)
+        {
+            if (std::hypot(static_cast<double>(p.X - foot.X), static_cast<double>(p.Y - foot.Y)) < near_distance)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    for (int end = 0; end < 2; ++end)
+    {
+        for (int guard = 0; guard < 256; ++guard)
+        {
+            const size_t n = chain.teeth.size();
+            const TrackedTooth& last = (end == 0) ? chain.teeth.front() : chain.teeth.back();
+            const TrackedTooth& before_last = (end == 0) ? chain.teeth[1] : chain.teeth[n - 2];
+            const double sx = static_cast<double>(last.foot.X - before_last.foot.X);
+            const double sy = static_cast<double>(last.foot.Y - before_last.foot.Y);
+            const double len = std::hypot(sx, sy);
+            if (len <= 0.0)
+            {
+                break;
+            }
+            const Point2LL candidate = roundedPoint(last.foot.X + sx / len * pitch, last.foot.Y + sy / len * pitch);
+            if (! region.inside(candidate, false) || near_existing(candidate))
+            {
+                break;
+            }
+            TrackedTooth tooth{ candidate, last.dir, -last.side, {}, {} };
+            if (! makeTooth(tooth, region, line_distance, ray_length))
+            {
+                break;
+            }
+            all_feet.push_back(tooth.foot);
+            if (end == 0)
+            {
+                chain.teeth.insert(chain.teeth.begin(), tooth);
+            }
+            else
+            {
+                chain.teeth.push_back(tooth);
+            }
+        }
+    }
+}
+
+// Derive the chains of one layer from the previous layer's chains: update every tooth in place
+// (dead teeth split their chain into fragments), then re-align directions, fill gaps and grow the
+// open ends into newly appeared region.
+std::vector<ToothChain> deriveChains(const std::vector<ToothChain>& previous, const Shape& region, const coord_t line_distance, const double ray_length)
+{
+    std::vector<ToothChain> derived;
+
+    for (const ToothChain& chain : previous)
+    {
+        std::vector<std::pair<TrackedTooth, bool>> updated;
+        updated.reserve(chain.teeth.size());
+        bool all_alive = true;
+        for (const TrackedTooth& tooth : chain.teeth)
+        {
+            TrackedTooth copy = tooth;
+            const bool alive = updateTooth(copy, region, line_distance, ray_length);
+            all_alive &= alive;
+            updated.emplace_back(copy, alive);
+        }
+
+        if (chain.closed && all_alive)
+        {
+            ToothChain intact;
+            intact.closed = true;
+            for (const auto& [tooth, alive] : updated)
+            {
+                intact.teeth.push_back(tooth);
+            }
+            derived.push_back(std::move(intact));
+            continue;
+        }
+
+        // Split into open fragments at the dead teeth. For a (broken) closed chain, start the
+        // walk behind a dead tooth so that the wrap-around run stays in one piece.
+        const size_t n = updated.size();
+        size_t start = 0;
+        if (chain.closed)
+        {
+            while (start < n && updated[start].second)
+            {
+                ++start;
+            }
+            ++start; // first index behind the first dead tooth
+        }
+        ToothChain fragment;
+        for (size_t k = 0; k < n; ++k)
+        {
+            const auto& [tooth, alive] = updated[(start + k) % n];
+            if (alive)
+            {
+                fragment.teeth.push_back(tooth);
+            }
+            else if (! fragment.teeth.empty())
+            {
+                derived.push_back(std::move(fragment));
+                fragment = ToothChain{};
+            }
+        }
+        if (! fragment.teeth.empty())
+        {
+            derived.push_back(std::move(fragment));
+        }
+    }
+
+    for (ToothChain& chain : derived)
+    {
+        fixParity(chain);
+        smoothDirections(chain);
+        fillGaps(chain, region, line_distance, ray_length);
+    }
+
+    std::vector<Point2LL> all_feet;
+    for (const ToothChain& chain : derived)
+    {
+        for (const TrackedTooth& tooth : chain.teeth)
+        {
+            all_feet.push_back(tooth.foot);
+        }
+    }
+    for (ToothChain& chain : derived)
+    {
+        extendEnds(chain, region, line_distance, ray_length, all_feet);
+    }
+
+    std::erase_if(
+        derived,
+        [](const ToothChain& chain)
+        {
+            return chain.teeth.size() < 2;
+        });
+    return derived;
+}
+
+// The printed wave of a set of chains: the polyline through the apexes of each chain.
+OpenLinesSet chainsToWaves(const std::vector<ToothChain>& chains)
+{
+    OpenLinesSet waves;
+    for (const ToothChain& chain : chains)
+    {
+        if (chain.teeth.size() < 2)
+        {
+            continue;
+        }
+        std::vector<Point2LL> points;
+        points.reserve(chain.teeth.size() + 1);
+        for (const TrackedTooth& tooth : chain.teeth)
+        {
+            points.push_back(tooth.apex);
+        }
+        if (chain.closed)
+        {
+            points.push_back(points.front());
+        }
+        waves.push_back(OpenPolyline{ points });
+    }
     return waves;
 }
 
@@ -905,34 +1243,57 @@ TriangleWaveTrackingProvider::TriangleWaveTrackingProvider(const std::vector<Sha
 
     layer_waves_.resize(layer_outlines.size());
 
-    // Build the layers bottom up: the teeth of every layer inherit their grid phase and parity
-    // from the teeth of the layer below, so the pattern follows a drifting model while staying
-    // in contact between consecutive layers.
-    std::vector<ToothRecord> previous_teeth;
+    // Build the layers bottom up. Only the first layer (and any part which newly appears on a
+    // higher layer) runs the full skeleton pipeline; every other layer is DERIVED tooth by tooth
+    // from the layer below, changing as little as possible: rib lines stay in place, only the
+    // tooth lengths follow the walls, and teeth are only added/removed where the region actually
+    // appeared or disappeared. Identical outlines therefore yield identical waves.
+    std::vector<ToothChain> chains;
     for (size_t layer_idx = 0; layer_idx < layer_outlines.size(); ++layer_idx)
     {
         Shape rotated = layer_outlines[layer_idx];
         rotated.applyMatrix(rotation_matrix_);
         rotated = rotated.unionPolygons();
 
-        std::vector<ToothRecord> current_teeth;
-        TrackingContext tracking{ layer_idx > 0 ? &previous_teeth : nullptr, &current_teeth };
+        const AABB region_box(rotated);
+        const double ray_length = vSizeMM(region_box.max_ - region_box.min_) * 1000.0 + static_cast<double>(line_distance);
 
-        OpenLinesSet waves;
+        std::vector<ToothChain> layer_chains = deriveChains(chains, rotated, line_distance, ray_length);
+        OpenLinesSet waves = chainsToWaves(layer_chains);
+
+        // Parts not reached by any derived tooth (new islands, or the very first layer) get a
+        // fresh wave from the full skeleton pipeline.
         for (const SingleShape& part : rotated.splitIntoParts())
         {
-            OpenLinesSet part_waves = buildSkeletonWaves(part, line_distance, &tracking);
+            const bool covered = std::any_of(
+                layer_chains.begin(),
+                layer_chains.end(),
+                [&part](const ToothChain& chain)
+                {
+                    return std::any_of(
+                        chain.teeth.begin(),
+                        chain.teeth.end(),
+                        [&part](const TrackedTooth& tooth)
+                        {
+                            return part.inside(tooth.foot, true);
+                        });
+                });
+            if (covered)
+            {
+                continue;
+            }
+            std::vector<ToothChain> fresh_chains;
+            OpenLinesSet part_waves = buildSkeletonWaves(part, line_distance, &fresh_chains);
             if (part_waves.empty())
             {
-                // No usable skeleton: the straight wave lies on an absolute grid, which is
-                // consistent across layers by construction.
-                part_waves = buildStraightWave(part, line_distance);
+                part_waves = buildStraightWave(part, line_distance, &fresh_chains);
             }
             waves.push_back(part_waves);
+            layer_chains.insert(layer_chains.end(), fresh_chains.begin(), fresh_chains.end());
         }
 
         layer_waves_[layer_idx] = std::move(waves);
-        previous_teeth = std::move(current_teeth);
+        chains = std::move(layer_chains);
     }
 }
 
