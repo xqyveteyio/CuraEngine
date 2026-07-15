@@ -13,6 +13,14 @@
 #include <cstdio>
 #endif
 
+#ifdef TW_EPIC_DEBUG
+#include <cstdio>
+namespace cura::tw_epic_debug
+{
+FILE* svg = nullptr; // when set, buildSkeletonWaves dumps its intermediate geometry here
+}
+#endif
+
 #include "BoostInterface.hpp" // needed for the boost voronoi traits of PolygonsSegmentIndex
 #include "geometry/OpenPolyline.h"
 #include "geometry/Shape.h"
@@ -206,6 +214,65 @@ void pruneSpurs(MedialAxisGraph& graph, const coord_t line_distance)
             if (is_corner_spur || too_narrow)
             {
                 graph.removeEdge(leaf, neighbor);
+                changed = true;
+            }
+        }
+    }
+}
+
+// Remove entire leaf branches which are too narrow to hold a wave: e.g. small mounting tabs
+// sticking out of a wall. Their skeleton stem is flat (the clearance stays at the tab half-width
+// instead of rising), so the per-edge spur pruning above stops at the first stem node and leaves
+// a junction on the main corridor. That junction would sever the corridor and surround the tab
+// with a fallback patch wave which does not line up with the corridor wave (visible as crossing
+// lines); with the stem gone, the corridor stays one continuous branch with one continuous wave.
+void pruneStubBranches(MedialAxisGraph& graph, const coord_t line_distance)
+{
+    const coord_t min_useful_clearance = (line_distance * 7) / 10;
+    const double max_stub_length = 3.0 * static_cast<double>(line_distance);
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        for (size_t leaf = 0; leaf < graph.nodes.size(); ++leaf)
+        {
+            if (graph.nodes[leaf].adj.size() != 1)
+            {
+                continue;
+            }
+            // Walk the degree-2 chain from the leaf up to the next terminal (junction or leaf).
+            std::vector<std::pair<size_t, size_t>> chain_edges;
+            double length = 0.0;
+            coord_t max_clearance = graph.nodes[leaf].clearance;
+            size_t prev = leaf;
+            size_t current = graph.nodes[leaf].adj.front();
+            while (true)
+            {
+                chain_edges.emplace_back(prev, current);
+                length += static_cast<double>(vSize(graph.nodes[current].p - graph.nodes[prev].p));
+                if (graph.nodes[current].adj.size() != 2)
+                {
+                    break; // terminal reached; its clearance belongs to the main corridor, not the stub
+                }
+                max_clearance = std::max(max_clearance, graph.nodes[current].clearance);
+                const auto& adj = graph.nodes[current].adj;
+                const size_t next = (adj[0] == prev) ? adj[1] : adj[0];
+                prev = current;
+                current = next;
+            }
+            // A narrow stub (e.g. the stem into a small mounting tab), or a fork at a junction
+            // which is not longer than the junction's own clearance: the latter is medial axis
+            // noise at widenings and end caps, and the region it covers lies almost entirely
+            // within the junction patch anyway.
+            const bool narrow_stub = max_clearance < min_useful_clearance && length < max_stub_length;
+            const bool junction_noise = graph.nodes[current].adj.size() >= 3 && length < 1.5 * static_cast<double>(graph.nodes[current].clearance);
+            const bool prune = narrow_stub || junction_noise;
+            if (prune)
+            {
+                for (const auto& [a, b] : chain_edges)
+                {
+                    graph.removeEdge(a, b);
+                }
                 changed = true;
             }
         }
@@ -616,6 +683,7 @@ OpenLinesSet buildSkeletonWaves(const SingleShape& part, const coord_t line_dist
 
     MedialAxisGraph graph = extractMedialAxis(part);
     pruneSpurs(graph, line_distance);
+    pruneStubBranches(graph, line_distance);
     std::vector<size_t> junctions;
     std::vector<SkeletonBranch> branches = extractBranches(graph, junctions);
     if (branches.empty())
@@ -674,6 +742,30 @@ OpenLinesSet buildSkeletonWaves(const SingleShape& part, const coord_t line_dist
     // Sever the region and sort the pieces into limbs and junction patches.
     const Shape remaining = cut_bands.empty() ? Shape(part) : part.difference(cut_bands.unionPolygons());
     std::vector<SingleShape> sub_parts = remaining.splitIntoParts();
+
+#ifdef TW_EPIC_DEBUG
+    if (tw_epic_debug::svg != nullptr)
+    {
+        for (const SkeletonBranch& branch : branches)
+        {
+            std::fprintf(tw_epic_debug::svg, "<polyline class='skeleton' points='");
+            for (const Point2LL& p : branch.points)
+            {
+                std::fprintf(tw_epic_debug::svg, "%lld,%lld ", static_cast<long long>(p.X), static_cast<long long>(p.Y));
+            }
+            std::fprintf(tw_epic_debug::svg, "'/>\n");
+        }
+        for (const Polygon& band : cut_bands)
+        {
+            std::fprintf(tw_epic_debug::svg, "<polygon class='cutband' points='");
+            for (const Point2LL& p : band)
+            {
+                std::fprintf(tw_epic_debug::svg, "%lld,%lld ", static_cast<long long>(p.X), static_cast<long long>(p.Y));
+            }
+            std::fprintf(tw_epic_debug::svg, "'/>\n");
+        }
+    }
+#endif
     std::vector<bool> is_patch(sub_parts.size(), false);
     for (size_t i = 0; i < sub_parts.size(); ++i)
     {
