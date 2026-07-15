@@ -16,7 +16,7 @@ on:
       - 'CMakeLists.txt'
       - '.github/workflows/build-binaries.yml'
     branches:
-      - add_triangle_wave_infill_epic
+      - 'add_*'
 
 jobs:
   build:
