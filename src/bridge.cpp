@@ -19,7 +19,6 @@ double bridgeAngle(
     const SliceDataStorage& storage,
     const unsigned layer_nr,
     const unsigned bridge_layer,
-
     const SupportLayer* support_layer,
     Shape& supported_regions)
 {
