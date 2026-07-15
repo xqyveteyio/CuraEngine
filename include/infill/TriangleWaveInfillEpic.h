@@ -1,8 +1,8 @@
 // Copyright (c) 2026 UltiMaker
 // CuraEngine is released under the terms of the AGPLv3 or higher.
 
-#ifndef INFILL_TRIANGLE_WAVE_INFILL_H
-#define INFILL_TRIANGLE_WAVE_INFILL_H
+#ifndef INFILL_TRIANGLE_WAVE_INFILL_EPIC_H
+#define INFILL_TRIANGLE_WAVE_INFILL_EPIC_H
 
 #include <vector>
 
@@ -34,7 +34,7 @@ class Shape;
  * length of the lines changes). Where the wave is cut off by the walls, the path is interrupted
  * and the printer travels (G0) to the next piece instead of extruding along the boundary.
  */
-class TriangleWaveFillProvider
+class TriangleWaveEpicFillProvider
 {
 public:
     /*!
@@ -44,7 +44,7 @@ public:
      * \param fill_angle The angle (in degrees) of the general direction of the wave. This must
      * be the same for all layers, otherwise the flanks cannot stack up between layers.
      */
-    TriangleWaveFillProvider(const std::vector<Shape>& layer_outlines, coord_t line_distance, const double fill_angle);
+    TriangleWaveEpicFillProvider(const std::vector<Shape>& layer_outlines, coord_t line_distance, const double fill_angle);
 
     /*!
      * Clip the template wave to the outline of one layer.
@@ -59,7 +59,7 @@ private:
 };
 
 /*!
- * Pre-computed, per-layer waves for the tracking ("advanced") triangle wave infill pattern.
+ * Pre-computed, per-layer waves for the epic (tracking) triangle wave infill pattern.
  *
  * This variant is meant for models whose outline drifts sideways from layer to layer (leaning or
  * twisting shapes), where one fixed model-global template cannot follow the geometry. Only the
@@ -78,7 +78,7 @@ private:
  * infill is bounded by the layer-to-layer difference of the model itself, which keeps
  * consecutive layers in contact.
  */
-class TriangleWaveTrackingProvider
+class TriangleWaveEpicTrackingProvider
 {
 public:
     /*!
@@ -87,7 +87,7 @@ public:
      * \param line_distance Horizontal distance between two successive flanks of the wave.
      * \param fill_angle The angle (in degrees) used for regions where no skeleton is available.
      */
-    TriangleWaveTrackingProvider(const std::vector<Shape>& layer_outlines, coord_t line_distance, const double fill_angle);
+    TriangleWaveEpicTrackingProvider(const std::vector<Shape>& layer_outlines, coord_t line_distance, const double fill_angle);
 
     /*!
      * Clip the pre-computed wave of one layer to the actual infill outline.
@@ -102,13 +102,13 @@ private:
     std::vector<OpenLinesSet> layer_waves_; // one pre-computed wave per layer, in the rotated coordinate frame
 };
 
-class TriangleWaveInfill
+class TriangleWaveInfillEpic
 {
 public:
     /*!
      * Generate the triangle wave pattern from a single outline, without cross-layer template.
      *
-     * This is the fallback used when no \ref TriangleWaveFillProvider is available (e.g. for
+     * This is the fallback used when no \ref TriangleWaveEpicFillProvider is available (e.g. for
      * support). The wave apexes lie on the same fixed absolute grid, but the tooth length is
      * derived from this outline only, so flank slopes may vary between layers.
      *
@@ -122,4 +122,4 @@ public:
 
 } // namespace cura
 
-#endif // INFILL_TRIANGLE_WAVE_INFILL_H
+#endif // INFILL_TRIANGLE_WAVE_INFILL_EPIC_H

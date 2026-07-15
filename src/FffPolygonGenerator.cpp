@@ -37,7 +37,9 @@
 #include "infill/LightningGenerator.h"
 #include "infill/SierpinskiFillProvider.h"
 #include "infill/SubDivCube.h"
-#include "infill/TriangleWaveInfill.h"
+#include "infill/TriangleWaveInfillAdvanced.h"
+#include "infill/TriangleWaveInfillEpic.h"
+#include "infill/TriangleWaveInfillSimple.h"
 #include "infill/UniformDensityProvider.h"
 #include "progress/Progress.h"
 #include "progress/ProgressEstimator.h"
@@ -706,7 +708,8 @@ void FffPolygonGenerator::processDerivedWallsSkinInfill(SliceMeshStorage& mesh)
     // Pre-compute the cross-layer data for the triangle wave infill patterns.
     const EFillMethod mesh_infill_pattern = mesh.settings.get<EFillMethod>("infill_pattern");
     if (mesh.settings.get<coord_t>("infill_line_distance") > 0
-        && (mesh_infill_pattern == EFillMethod::TRIANGLE_WAVE || mesh_infill_pattern == EFillMethod::TRIANGLE_WAVE_TRACKING))
+        && (mesh_infill_pattern == EFillMethod::TRIANGLE_WAVE_SIMPLE || mesh_infill_pattern == EFillMethod::TRIANGLE_WAVE_ADVANCED
+            || mesh_infill_pattern == EFillMethod::TRIANGLE_WAVE_EPIC))
     {
         std::vector<Shape> layer_infill_areas;
         layer_infill_areas.reserve(mesh.layers.size());
@@ -725,18 +728,24 @@ void FffPolygonGenerator::processDerivedWallsSkinInfill(SliceMeshStorage& mesh)
         const std::vector<AngleDegrees> infill_angles = mesh.settings.get<std::vector<AngleDegrees>>("infill_angles");
         const AngleDegrees fill_angle = infill_angles.empty() ? AngleDegrees(45) : infill_angles.front();
 
-        if (mesh_infill_pattern == EFillMethod::TRIANGLE_WAVE)
+        if (mesh_infill_pattern == EFillMethod::TRIANGLE_WAVE_SIMPLE)
         {
-            // One model-global template wave, so that the flanks are exactly aligned between layers.
-            mesh.triangle_wave_fill_provider
-                = std::make_shared<TriangleWaveFillProvider>(layer_infill_areas, mesh.settings.get<coord_t>("infill_line_distance"), fill_angle);
+            // One model-global straight template wave, so that the flanks are exactly aligned between layers.
+            mesh.triangle_wave_simple_provider
+                = std::make_shared<TriangleWaveSimpleFillProvider>(layer_infill_areas, mesh.settings.get<coord_t>("infill_line_distance"), fill_angle);
+        }
+        else if (mesh_infill_pattern == EFillMethod::TRIANGLE_WAVE_ADVANCED)
+        {
+            // One model-global skeleton-driven template wave that follows the medial axis of each part.
+            mesh.triangle_wave_advanced_provider
+                = std::make_shared<TriangleWaveAdvancedFillProvider>(layer_infill_areas, mesh.settings.get<coord_t>("infill_line_distance"), fill_angle);
         }
         else
         {
             // Per-layer waves with the tooth grid phase locked onto the layer below, for models
             // whose outline drifts from layer to layer.
-            mesh.triangle_wave_tracking_provider
-                = std::make_shared<TriangleWaveTrackingProvider>(layer_infill_areas, mesh.settings.get<coord_t>("infill_line_distance"), fill_angle);
+            mesh.triangle_wave_epic_provider
+                = std::make_shared<TriangleWaveEpicTrackingProvider>(layer_infill_areas, mesh.settings.get<coord_t>("infill_line_distance"), fill_angle);
         }
     }
 

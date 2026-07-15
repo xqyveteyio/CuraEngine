@@ -1939,7 +1939,9 @@ bool FffGcodeWriter::processMultiLayerInfill(
     {
         const coord_t infill_line_width = mesh_config.infill_config[combine_idx].getLineWidth();
         const EFillMethod infill_pattern = mesh.settings.get<EFillMethod>("infill_pattern");
-        const bool zig_zaggify_infill = mesh.settings.get<bool>("zig_zaggify_infill") || infill_pattern == EFillMethod::ZIG_ZAG || infill_pattern == EFillMethod::TRIANGLE_WAVE || infill_pattern == EFillMethod::TRIANGLE_WAVE_TRACKING;
+        const bool zig_zaggify_infill = mesh.settings.get<bool>("zig_zaggify_infill") || infill_pattern == EFillMethod::ZIG_ZAG
+                                     || infill_pattern == EFillMethod::TRIANGLE_WAVE_SIMPLE || infill_pattern == EFillMethod::TRIANGLE_WAVE_ADVANCED
+                                     || infill_pattern == EFillMethod::TRIANGLE_WAVE_EPIC;
         const bool connect_polygons = mesh.settings.get<bool>("connect_infill_polygons");
         const size_t infill_multiplier = mesh.settings.get<size_t>("infill_multiplier");
         Shape infill_polygons;
@@ -2460,7 +2462,8 @@ bool FffGcodeWriter::processSingleLayerInfill(
     OpenLinesSet infill_lines;
 
     const auto pattern = mesh.settings.get<EFillMethod>("infill_pattern");
-    const bool zig_zaggify_infill = mesh.settings.get<bool>("zig_zaggify_infill") || pattern == EFillMethod::ZIG_ZAG || pattern == EFillMethod::TRIANGLE_WAVE || pattern == EFillMethod::TRIANGLE_WAVE_TRACKING;
+    const bool zig_zaggify_infill = mesh.settings.get<bool>("zig_zaggify_infill") || pattern == EFillMethod::ZIG_ZAG || pattern == EFillMethod::TRIANGLE_WAVE_SIMPLE
+                                 || pattern == EFillMethod::TRIANGLE_WAVE_ADVANCED || pattern == EFillMethod::TRIANGLE_WAVE_EPIC;
     const bool connect_polygons = mesh.settings.get<bool>("connect_infill_polygons");
     const auto infill_overlap = mesh.settings.get<coord_t>("infill_overlap_mm");
     const auto infill_multiplier = mesh.settings.get<size_t>("infill_multiplier");

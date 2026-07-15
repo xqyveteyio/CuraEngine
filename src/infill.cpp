@@ -15,7 +15,9 @@
 #include "geometry/OpenPolyline.h"
 #include "geometry/PointMatrix.h"
 #include "infill/GyroidInfill.h"
-#include "infill/TriangleWaveInfill.h"
+#include "infill/TriangleWaveInfillAdvanced.h"
+#include "infill/TriangleWaveInfillEpic.h"
+#include "infill/TriangleWaveInfillSimple.h"
 #include "infill/ImageBasedDensityProvider.h"
 #include "infill/LightningGenerator.h"
 #include "infill/NoZigZagConnectorProcessor.h"
@@ -314,11 +316,14 @@ void Infill::_generate(
     case EFillMethod::GYROID:
         generateGyroidInfill(result_lines, result_polygons);
         break;
-    case EFillMethod::TRIANGLE_WAVE:
-        generateTriangleWaveInfill(result_lines, result_polygons, mesh ? mesh->triangle_wave_fill_provider : nullptr);
+    case EFillMethod::TRIANGLE_WAVE_SIMPLE:
+        generateTriangleWaveSimpleInfill(result_lines, result_polygons, mesh ? mesh->triangle_wave_simple_provider : nullptr);
         break;
-    case EFillMethod::TRIANGLE_WAVE_TRACKING:
-        generateTriangleWaveTrackingInfill(result_lines, result_polygons, mesh ? mesh->triangle_wave_tracking_provider : nullptr, layer_idx);
+    case EFillMethod::TRIANGLE_WAVE_ADVANCED:
+        generateTriangleWaveAdvancedInfill(result_lines, result_polygons, mesh ? mesh->triangle_wave_advanced_provider : nullptr);
+        break;
+    case EFillMethod::TRIANGLE_WAVE_EPIC:
+        generateTriangleWaveEpicInfill(result_lines, result_polygons, mesh ? mesh->triangle_wave_epic_provider : nullptr, layer_idx);
         break;
     case EFillMethod::LIGHTNING:
         assert(lightning_trees); // "Cannot generate Lightning infill without a generator!\n"
@@ -356,7 +361,8 @@ void Infill::_generate(
 
     if (! skip_line_stitching_
         && (zig_zaggify_ || pattern_ == EFillMethod::CROSS || pattern_ == EFillMethod::CROSS_3D || pattern_ == EFillMethod::CUBICSUBDIV || pattern_ == EFillMethod::GYROID
-            || pattern_ == EFillMethod::TRIANGLE_WAVE || pattern_ == EFillMethod::TRIANGLE_WAVE_TRACKING || pattern_ == EFillMethod::ZIG_ZAG))
+            || pattern_ == EFillMethod::TRIANGLE_WAVE_SIMPLE || pattern_ == EFillMethod::TRIANGLE_WAVE_ADVANCED || pattern_ == EFillMethod::TRIANGLE_WAVE_EPIC
+            || pattern_ == EFillMethod::ZIG_ZAG))
     { // don't stich for non-zig-zagged line infill types
         OpenLinesSet stitched_lines;
         OpenPolylineStitcher::stitch(result_lines, stitched_lines, result_polygons, infill_line_width_);
@@ -434,7 +440,7 @@ void Infill::generateGyroidInfill(OpenLinesSet& result_lines, Shape& result_poly
     OpenPolylineStitcher::stitch(line_segments, result_lines, result_polygons, infill_line_width_);
 }
 
-void Infill::generateTriangleWaveInfill(OpenLinesSet& result_lines, Shape& result_polygons, const std::shared_ptr<TriangleWaveFillProvider>& provider)
+void Infill::generateTriangleWaveSimpleInfill(OpenLinesSet& result_lines, Shape& result_polygons, const std::shared_ptr<TriangleWaveSimpleFillProvider>& provider)
 {
     OpenLinesSet line_segments;
     if (provider)
@@ -445,15 +451,31 @@ void Infill::generateTriangleWaveInfill(OpenLinesSet& result_lines, Shape& resul
     else
     {
         // no cross-layer template available (e.g. support): generate from this outline only
-        TriangleWaveInfill::generateTotalTriangleWaveInfill(line_segments, line_distance_, inner_contour_, fill_angle_);
+        TriangleWaveInfillSimple::generateTotalTriangleWaveInfill(line_segments, line_distance_, inner_contour_, fill_angle_);
     }
     OpenPolylineStitcher::stitch(line_segments, result_lines, result_polygons, infill_line_width_);
 }
 
-void Infill::generateTriangleWaveTrackingInfill(
+void Infill::generateTriangleWaveAdvancedInfill(OpenLinesSet& result_lines, Shape& result_polygons, const std::shared_ptr<TriangleWaveAdvancedFillProvider>& provider)
+{
+    OpenLinesSet line_segments;
+    if (provider)
+    {
+        // clip the model-global skeleton-driven template wave to this layer
+        provider->generate(line_segments, inner_contour_);
+    }
+    else
+    {
+        // no cross-layer template available (e.g. support): generate from this outline only
+        TriangleWaveInfillAdvanced::generateTotalTriangleWaveInfill(line_segments, line_distance_, inner_contour_, fill_angle_);
+    }
+    OpenPolylineStitcher::stitch(line_segments, result_lines, result_polygons, infill_line_width_);
+}
+
+void Infill::generateTriangleWaveEpicInfill(
     OpenLinesSet& result_lines,
     Shape& result_polygons,
-    const std::shared_ptr<TriangleWaveTrackingProvider>& provider,
+    const std::shared_ptr<TriangleWaveEpicTrackingProvider>& provider,
     int layer_idx)
 {
     OpenLinesSet line_segments;
@@ -465,7 +487,7 @@ void Infill::generateTriangleWaveTrackingInfill(
     else
     {
         // no cross-layer tracking available (e.g. support): generate from this outline only
-        TriangleWaveInfill::generateTotalTriangleWaveInfill(line_segments, line_distance_, inner_contour_, fill_angle_);
+        TriangleWaveInfillEpic::generateTotalTriangleWaveInfill(line_segments, line_distance_, inner_contour_, fill_angle_);
     }
     OpenPolylineStitcher::stitch(line_segments, result_lines, result_polygons, infill_line_width_);
 }

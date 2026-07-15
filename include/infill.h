@@ -25,8 +25,9 @@ namespace cura
 
 class SierpinskiFillProvider;
 class SliceMeshStorage;
-class TriangleWaveFillProvider;
-class TriangleWaveTrackingProvider;
+class TriangleWaveSimpleFillProvider;
+class TriangleWaveAdvancedFillProvider;
+class TriangleWaveEpicTrackingProvider;
 
 class Infill
 {
@@ -404,15 +405,25 @@ private:
     void generateGyroidInfill(OpenLinesSet& result_polylines, Shape& result_polygons);
 
     /*!
-     * Generate triangle wave infill: one continuous path that oscillates as a triangle wave.
+     * Generate the simple triangle wave infill: one continuous path that oscillates as a
+     * straight triangle wave, clipped from a model-global template.
      * \param result_polylines (output) The resulting polylines
      * \param result_polygons (output) The resulting polygons, if stitching accidentally happened to connect the wave in a circle.
      * \param provider The pre-computed model-global template wave; when given, the flanks are exactly aligned between layers.
      */
-    void generateTriangleWaveInfill(OpenLinesSet& result_polylines, Shape& result_polygons, const std::shared_ptr<TriangleWaveFillProvider>& provider);
+    void generateTriangleWaveSimpleInfill(OpenLinesSet& result_polylines, Shape& result_polygons, const std::shared_ptr<TriangleWaveSimpleFillProvider>& provider);
 
     /*!
-     * Generate the tracking ("advanced") triangle wave infill for models whose outline drifts
+     * Generate the advanced triangle wave infill: the wave follows the medial axis (skeleton)
+     * of each part, so that curved and branching shapes are filled along their local direction.
+     * \param result_polylines (output) The resulting polylines
+     * \param result_polygons (output) The resulting polygons, if stitching accidentally happened to connect the wave in a circle.
+     * \param provider The pre-computed model-global skeleton-driven template wave.
+     */
+    void generateTriangleWaveAdvancedInfill(OpenLinesSet& result_polylines, Shape& result_polygons, const std::shared_ptr<TriangleWaveAdvancedFillProvider>& provider);
+
+    /*!
+     * Generate the epic (tracking) triangle wave infill for models whose outline drifts
      * from layer to layer: the wave is regenerated per layer, with the tooth grid phase locked
      * onto the layer below so that consecutive layers stay in contact.
      * \param result_polylines (output) The resulting polylines
@@ -420,10 +431,10 @@ private:
      * \param provider The pre-computed per-layer waves.
      * \param layer_idx The layer for which to generate the infill.
      */
-    void generateTriangleWaveTrackingInfill(
+    void generateTriangleWaveEpicInfill(
         OpenLinesSet& result_polylines,
         Shape& result_polygons,
-        const std::shared_ptr<TriangleWaveTrackingProvider>& provider,
+        const std::shared_ptr<TriangleWaveEpicTrackingProvider>& provider,
         int layer_idx);
 
     /*!

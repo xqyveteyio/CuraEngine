@@ -112,7 +112,9 @@ set(engine_SRCS # Except main.cpp.
         src/infill/SierpinskiFillProvider.cpp
         src/infill/SubDivCube.cpp
         src/infill/GyroidInfill.cpp
-        src/infill/TriangleWaveInfill.cpp
+        src/infill/TriangleWaveInfillSimple.cpp
+        src/infill/TriangleWaveInfillAdvanced.cpp
+        src/infill/TriangleWaveInfillEpic.cpp
 
         src/pathPlanning/Comb.cpp
         src/pathPlanning/GCodePath.cpp

@@ -1,7 +1,7 @@
 // Copyright (c) 2026 UltiMaker
 // CuraEngine is released under the terms of the AGPLv3 or higher.
 
-#include "infill/TriangleWaveInfill.h"
+#include "infill/TriangleWaveInfillEpic.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1197,7 +1197,7 @@ OpenLinesSet clipWave(const OpenLinesSet& wave, const Shape& outline, const Poin
 
 } // namespace
 
-TriangleWaveFillProvider::TriangleWaveFillProvider(const std::vector<Shape>& layer_outlines, coord_t line_distance, const double fill_angle)
+TriangleWaveEpicFillProvider::TriangleWaveEpicFillProvider(const std::vector<Shape>& layer_outlines, coord_t line_distance, const double fill_angle)
     : rotation_matrix_(fill_angle)
 {
     if (line_distance <= 0)
@@ -1220,7 +1220,7 @@ TriangleWaveFillProvider::TriangleWaveFillProvider(const std::vector<Shape>& lay
     template_wave_ = buildWaves(all_layers, line_distance);
 }
 
-void TriangleWaveFillProvider::generate(OpenLinesSet& result_lines, const Shape& in_outline) const
+void TriangleWaveEpicFillProvider::generate(OpenLinesSet& result_lines, const Shape& in_outline) const
 {
     if (template_wave_.empty() || in_outline.empty())
     {
@@ -1233,7 +1233,7 @@ void TriangleWaveFillProvider::generate(OpenLinesSet& result_lines, const Shape&
     result_lines = clipWave(template_wave_, outline, rotation_matrix_);
 }
 
-TriangleWaveTrackingProvider::TriangleWaveTrackingProvider(const std::vector<Shape>& layer_outlines, coord_t line_distance, const double fill_angle)
+TriangleWaveEpicTrackingProvider::TriangleWaveEpicTrackingProvider(const std::vector<Shape>& layer_outlines, coord_t line_distance, const double fill_angle)
     : rotation_matrix_(fill_angle)
 {
     if (line_distance <= 0)
@@ -1297,7 +1297,7 @@ TriangleWaveTrackingProvider::TriangleWaveTrackingProvider(const std::vector<Sha
     }
 }
 
-void TriangleWaveTrackingProvider::generate(OpenLinesSet& result_lines, const Shape& in_outline, size_t layer_idx) const
+void TriangleWaveEpicTrackingProvider::generate(OpenLinesSet& result_lines, const Shape& in_outline, size_t layer_idx) const
 {
     if (layer_idx >= layer_waves_.size() || layer_waves_[layer_idx].empty() || in_outline.empty())
     {
@@ -1310,7 +1310,7 @@ void TriangleWaveTrackingProvider::generate(OpenLinesSet& result_lines, const Sh
     result_lines = clipWave(layer_waves_[layer_idx], outline, rotation_matrix_);
 }
 
-void TriangleWaveInfill::generateTotalTriangleWaveInfill(OpenLinesSet& result_lines, coord_t line_distance, const Shape& in_outline, const double fill_angle)
+void TriangleWaveInfillEpic::generateTotalTriangleWaveInfill(OpenLinesSet& result_lines, coord_t line_distance, const Shape& in_outline, const double fill_angle)
 {
     if (line_distance <= 0 || in_outline.empty())
     {
