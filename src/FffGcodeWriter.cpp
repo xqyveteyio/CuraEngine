@@ -3790,7 +3790,8 @@ void FffGcodeWriter::processSkinPrintFeature(
             }
             else
             {
-                const SpaceFillType space_fill_type = (pattern == EFillMethod::ZIG_ZAG || pattern == EFillMethod::MEDIAL_AXIS_ZIGZAG) ? SpaceFillType::PolyLines : SpaceFillType::Lines;
+                const SpaceFillType space_fill_type
+                    = (pattern == EFillMethod::ZIG_ZAG || pattern == EFillMethod::MEDIAL_AXIS_ZIGZAG) ? SpaceFillType::PolyLines : SpaceFillType::Lines;
                 constexpr coord_t wipe_dist = 0;
                 gcode_layer.addLinesMonotonic(area, skin_lines, config, space_fill_type, monotonic_direction, max_adjacent_distance, exclude_distance, wipe_dist, flow, fan_speed);
             }
@@ -3823,7 +3824,8 @@ void FffGcodeWriter::processSkinPrintFeature(
             }
             else
             {
-                SpaceFillType space_fill_type = (actual_pattern == EFillMethod::ZIG_ZAG || actual_pattern == EFillMethod::MEDIAL_AXIS_ZIGZAG) ? SpaceFillType::PolyLines : SpaceFillType::Lines;
+                SpaceFillType space_fill_type
+                    = (actual_pattern == EFillMethod::ZIG_ZAG || actual_pattern == EFillMethod::MEDIAL_AXIS_ZIGZAG) ? SpaceFillType::PolyLines : SpaceFillType::Lines;
                 constexpr coord_t wipe_dist = 0;
                 gcode_layer.addLinesByOptimizer(skin_lines, config, space_fill_type, enable_travel_optimization, wipe_dist, flow, near_start_location, fan_speed);
             }

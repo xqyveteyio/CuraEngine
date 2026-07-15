@@ -318,8 +318,8 @@ std::vector<CenterLine> assembleCenterLines(std::vector<MedialChain>& chains)
                     continue;
                 }
                 const bool candidate_forward = (candidate.v0 == node);
-                const Point2LL outgoing_direction = candidate_forward ? (candidate.points[1] - candidate.points[0])
-                                                                      : (candidate.points[candidate.points.size() - 2] - candidate.points.back());
+                const Point2LL outgoing_direction
+                    = candidate_forward ? (candidate.points[1] - candidate.points[0]) : (candidate.points[candidate.points.size() - 2] - candidate.points.back());
                 const double lengths = vSize(incoming_direction) * vSize(outgoing_direction);
                 if (lengths <= 0)
                 {

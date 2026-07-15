@@ -205,8 +205,8 @@ std::vector<InfillTestParameters> generateInfillTests()
      *  - Concentric and ZigZag, since they now use a method that starts from an extra infill wall, which fail these tests (TODO!)
      *  - Medial Axis ZigZag, since it fills along the centerline of the part, so the line distance doesn't map to an area density
      */
-    std::vector<EFillMethod> skip_methods = { EFillMethod::CONCENTRIC, EFillMethod::ZIG_ZAG,  EFillMethod::CROSS,     EFillMethod::CROSS_3D,
-                                              EFillMethod::CUBICSUBDIV, EFillMethod::GYROID,   EFillMethod::LIGHTNING, EFillMethod::MEDIAL_AXIS_ZIGZAG };
+    std::vector<EFillMethod> skip_methods = { EFillMethod::CONCENTRIC,  EFillMethod::ZIG_ZAG, EFillMethod::CROSS,     EFillMethod::CROSS_3D,
+                                              EFillMethod::CUBICSUBDIV, EFillMethod::GYROID,  EFillMethod::LIGHTNING, EFillMethod::MEDIAL_AXIS_ZIGZAG };
 
     std::vector<EFillMethod> methods;
     for (int i_method = 0; i_method < static_cast<int>(EFillMethod::NONE); ++i_method)
