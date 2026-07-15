@@ -17,6 +17,7 @@ on:
       - '.github/workflows/build-binaries.yml'
     branches:
       - add_triangle_wave_infill_epic
+      - add_triangle_wave_infill_merge
 
 jobs:
   build:
