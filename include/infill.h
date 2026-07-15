@@ -59,6 +59,7 @@ class Infill
     size_t zag_skip_count_{}; //!< (ZigZag) To skip one zag in every N if skip some zags is enabled
     coord_t pocket_size_{}; //!< The size of the pockets at the intersections of the fractal in the cross 3d pattern
     bool mirror_offset_{}; //!< Indication in which offset direction the extra infill lines are made
+    int layer_idx_{ 0 }; //!< The layer number for which we generate infill (used by patterns that alternate between layers)
 
     static constexpr auto one_over_sqrt_2 = 1.0 / std::numbers::sqrt2;
 
@@ -399,6 +400,13 @@ private:
      * \param result_polygons (output) The resulting polygons, if zigzagging accidentally happened to connect gyroid lines in a circle.
      */
     void generateGyroidInfill(OpenLinesSet& result_polylines, Shape& result_polygons);
+
+    /*!
+     * Generate medial-axis zigzag infill: a continuous triangular wave along the centerline
+     * (medial axis) of each part, with a per-layer phase flip to interlock consecutive layers.
+     * \param result_lines (output) The resulting polylines
+     */
+    void generateMedialAxisZigzagInfill(OpenLinesSet& result_lines);
 
     /*!
      * Generate lightning fill aka minfill aka 'Ribbed Support Vault Infill', see Tricard,Claux,Lefebvre/'Ribbed Support Vaults for 3D Printing of Hollowed Objects'

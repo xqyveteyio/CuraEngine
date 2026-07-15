@@ -268,5 +268,11 @@ TEST_F(SettingsTest, EnumStringSwitch)
     EXPECT_EQ(settings.get<EFillMethod>("infill_type"), EFillMethod::LIGHTNING);
 }
 
+TEST_F(SettingsTest, EnumMedialAxisZigzag)
+{
+    settings.add("infill_type", "medial_axis_zigzag");
+    EXPECT_EQ(settings.get<EFillMethod>("infill_type"), EFillMethod::MEDIAL_AXIS_ZIGZAG);
+}
+
 } // namespace cura
 // NOLINTEND(*-magic-numbers)
