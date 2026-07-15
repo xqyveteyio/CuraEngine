@@ -15,15 +15,15 @@
 #include "geometry/OpenPolyline.h"
 #include "geometry/PointMatrix.h"
 #include "infill/GyroidInfill.h"
-#include "infill/TriangleWaveInfillAdvanced.h"
-#include "infill/TriangleWaveInfillEpic.h"
-#include "infill/TriangleWaveInfillSimple.h"
 #include "infill/ImageBasedDensityProvider.h"
 #include "infill/LightningGenerator.h"
 #include "infill/NoZigZagConnectorProcessor.h"
 #include "infill/SierpinskiFill.h"
 #include "infill/SierpinskiFillProvider.h"
 #include "infill/SubDivCube.h"
+#include "infill/TriangleWaveInfillAdvanced.h"
+#include "infill/TriangleWaveInfillEpic.h"
+#include "infill/TriangleWaveInfillSimple.h"
 #include "infill/UniformDensityProvider.h"
 #include "plugins/slots.h"
 #include "sliceDataStorage.h"
@@ -472,11 +472,7 @@ void Infill::generateTriangleWaveAdvancedInfill(OpenLinesSet& result_lines, Shap
     OpenPolylineStitcher::stitch(line_segments, result_lines, result_polygons, infill_line_width_);
 }
 
-void Infill::generateTriangleWaveEpicInfill(
-    OpenLinesSet& result_lines,
-    Shape& result_polygons,
-    const std::shared_ptr<TriangleWaveEpicTrackingProvider>& provider,
-    int layer_idx)
+void Infill::generateTriangleWaveEpicInfill(OpenLinesSet& result_lines, Shape& result_polygons, const std::shared_ptr<TriangleWaveEpicTrackingProvider>& provider, int layer_idx)
 {
     OpenLinesSet line_segments;
     if (provider && layer_idx >= 0)

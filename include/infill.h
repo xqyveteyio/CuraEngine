@@ -431,11 +431,7 @@ private:
      * \param provider The pre-computed per-layer waves.
      * \param layer_idx The layer for which to generate the infill.
      */
-    void generateTriangleWaveEpicInfill(
-        OpenLinesSet& result_polylines,
-        Shape& result_polygons,
-        const std::shared_ptr<TriangleWaveEpicTrackingProvider>& provider,
-        int layer_idx);
+    void generateTriangleWaveEpicInfill(OpenLinesSet& result_polylines, Shape& result_polygons, const std::shared_ptr<TriangleWaveEpicTrackingProvider>& provider, int layer_idx);
 
     /*!
      * Generate lightning fill aka minfill aka 'Ribbed Support Vault Infill', see Tricard,Claux,Lefebvre/'Ribbed Support Vaults for 3D Printing of Hollowed Objects'
