@@ -425,7 +425,8 @@ OpenLinesSet buildWave(const std::map<int64_t, std::pair<coord_t, coord_t>>& ext
     ToothChain chain;
     auto flush_wave = [&]()
     {
-        if (wave_points.size() >= 2)
+        // Two apexes alone are only a single diagonal flank, not a printable zigzag run.
+        if (wave_points.size() >= 3)
         {
             wave.push_back(OpenPolyline{ wave_points });
         }
@@ -508,9 +509,11 @@ public:
         return roundedPoint(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t);
     }
 
-    Vec2d tangentAt(const double s) const
+    // Direction of the path around s, measured by central difference over 2h. A larger h smooths
+    // out local wiggles of the medial axis (e.g. remnants of pruned side stems), which is
+    // essential for stable rib directions.
+    Vec2d tangentAt(const double s, const double h = 100.0) const
     {
-        constexpr double h = 100.0; // central difference step [μm]
         const Point2LL before = at(closed_ ? s - h : std::max(s - h, 0.0));
         const Point2LL after = at(closed_ ? s + h : std::min(s + h, length()));
         const double dx = static_cast<double>(after.X - before.X);
@@ -668,6 +671,71 @@ Polygon cutBand(const Shape& region, const Point2LL& p, const Vec2d& tangent, co
     band.push_back(roundedPoint(p.X - normal.x * d_minus + tx, p.Y - normal.y * d_minus + ty));
     band.push_back(roundedPoint(p.X - normal.x * d_minus - tx, p.Y - normal.y * d_minus - ty));
     return band;
+}
+
+// Straight-axis fallback fill for junction patches only (not tracked between layers).
+OpenLinesSet buildJunctionPatchWaves(const SingleShape& part, const coord_t line_distance)
+{
+    OpenLinesSet waves;
+
+    MedialAxisGraph graph = extractMedialAxis(part);
+    pruneSpurs(graph, line_distance);
+    pruneStubBranches(graph, line_distance);
+    std::vector<size_t> junctions;
+    const std::vector<SkeletonBranch> branches = extractBranches(graph, junctions);
+    if (junctions.empty())
+    {
+        return waves;
+    }
+
+    const AABB part_box(part);
+    const double ray_length = vSizeMM(part_box.max_ - part_box.min_) * 1000.0 + static_cast<double>(line_distance);
+    Shape cut_bands;
+    const double min_limb_length = static_cast<double>(line_distance) / 2.0;
+
+    for (const SkeletonBranch& branch : branches)
+    {
+        PathSampler sampler(branch.points, branch.closed);
+        if (branch.closed)
+        {
+            continue;
+        }
+        const double cut_start = branch.start_at_junction ? static_cast<double>(graph.nodes[branch.start_node].clearance) : 0.0;
+        const double cut_end = branch.end_at_junction ? static_cast<double>(graph.nodes[branch.end_node].clearance) : 0.0;
+        if (sampler.length() < cut_start + cut_end + min_limb_length)
+        {
+            continue;
+        }
+        if (branch.start_at_junction)
+        {
+            cut_bands.push_back(cutBand(part, sampler.at(cut_start), sampler.tangentAt(cut_start), line_distance, ray_length));
+        }
+        if (branch.end_at_junction)
+        {
+            const double s_end = sampler.length() - cut_end;
+            cut_bands.push_back(cutBand(part, sampler.at(s_end), sampler.tangentAt(s_end), line_distance, ray_length));
+        }
+    }
+
+    const Shape remaining = cut_bands.empty() ? Shape(part) : part.difference(cut_bands.unionPolygons());
+    const std::vector<SingleShape> sub_parts = remaining.splitIntoParts();
+    for (size_t i = 0; i < sub_parts.size(); ++i)
+    {
+        bool is_patch = false;
+        for (const size_t junction : junctions)
+        {
+            if (sub_parts[i].inside(graph.nodes[junction].p, true))
+            {
+                is_patch = true;
+                break;
+            }
+        }
+        if (is_patch)
+        {
+            waves.push_back(buildStraightWave(sub_parts[i], line_distance, nullptr));
+        }
+    }
+    return waves;
 }
 
 // Skeleton driven triangle wave for one connected part of the template region:
@@ -853,7 +921,9 @@ OpenLinesSet buildSkeletonWaves(const SingleShape& part, const coord_t line_dist
     {
         if (is_patch[i])
         {
-            waves.push_back(buildStraightWave(sub_parts[i], line_distance, chains_out));
+            // Do not record patch teeth for tracking: tiny 2-tooth pocket chains persist across
+            // layers and show up as isolated diagonal segments between the main corridor waves.
+            waves.push_back(buildStraightWave(sub_parts[i], line_distance, nullptr));
         }
     }
 
@@ -942,7 +1012,9 @@ bool updateTooth(TrackedTooth& tooth, const Shape& region, const coord_t line_di
 
     tooth.apex = roundedPoint(tooth.foot.X + apex_dir.x * a_new, tooth.foot.Y + apex_dir.y * a_new);
     tooth.base = roundedPoint(tooth.foot.X - apex_dir.x * b_new, tooth.foot.Y - apex_dir.y * b_new);
-    tooth.foot = roundedPoint((tooth.apex.X + tooth.base.X) / 2.0, (tooth.apex.Y + tooth.base.Y) / 2.0);
+    // Keep the rib anchor fixed. Re-centering the foot onto the chord midpoint used to drift every
+    // tooth along its rib each layer; at open chain ends that drift accumulates into crossing
+    // apex polylines ("flying" segments) even when the outline barely changes.
     return true;
 }
 
@@ -1271,6 +1343,14 @@ std::vector<ToothChain> deriveChains(const std::vector<ToothChain>& previous, co
         {
             return chain.teeth.size() < 2;
         });
+    std::erase_if(
+        derived,
+        [](const ToothChain& chain)
+        {
+            // Orphaned pocket chains from older runs / edge cases: an open 2-tooth chain is only
+            // a single flank and reads as a "flying" diagonal once clipped.
+            return ! chain.closed && chain.teeth.size() == 2;
+        });
     return derived;
 }
 
@@ -1407,6 +1487,16 @@ TriangleWaveEpicTrackingProvider::TriangleWaveEpicTrackingProvider(const std::ve
         std::vector<ToothChain> layer_chains = deriveChains(chains, rotated, line_distance, ray_length);
         OpenLinesSet waves = chainsToWaves(layer_chains);
 
+        // Junction patches are not tracked tooth-by-tooth; refresh their straight fallback fill
+        // on derived layers. Layer 0 instead gets them from the full skeleton pipeline below.
+        if (layer_idx > 0 || ! layer_chains.empty())
+        {
+            for (const SingleShape& part : rotated.splitIntoParts())
+            {
+                waves.push_back(buildJunctionPatchWaves(part, line_distance));
+            }
+        }
+
         // Parts not reached by any derived tooth (new islands, or the very first layer) get a
         // fresh wave from the full skeleton pipeline.
         for (const SingleShape& part : rotated.splitIntoParts())
@@ -1440,6 +1530,25 @@ TriangleWaveEpicTrackingProvider::TriangleWaveEpicTrackingProvider(const std::ve
 
         layer_waves_[layer_idx] = std::move(waves);
         chains = std::move(layer_chains);
+
+#ifdef TW_EPIC_DEBUG
+        if (tw_epic_debug::svg != nullptr && layer_idx == 0)
+        {
+            for (const ToothChain& chain : chains)
+            {
+                for (const TrackedTooth& tooth : chain.teeth)
+                {
+                    std::fprintf(
+                        tw_epic_debug::svg,
+                        "<polyline class='rib' points='%lld,%lld %lld,%lld'/>\n",
+                        static_cast<long long>(tooth.base.X),
+                        static_cast<long long>(tooth.base.Y),
+                        static_cast<long long>(tooth.apex.X),
+                        static_cast<long long>(tooth.apex.Y));
+                }
+            }
+        }
+#endif
 
 #ifdef TW_EPIC_BENCH
         const auto bench_now = std::chrono::steady_clock::now();
