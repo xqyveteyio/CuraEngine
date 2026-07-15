@@ -8,6 +8,11 @@
 #include <map>
 #include <set>
 
+#ifdef TW_EPIC_BENCH
+#include <chrono>
+#include <cstdio>
+#endif
+
 #include "BoostInterface.hpp" // needed for the boost voronoi traits of PolygonsSegmentIndex
 #include "geometry/OpenPolyline.h"
 #include "geometry/Shape.h"
@@ -852,6 +857,7 @@ bool updateTooth(TrackedTooth& tooth, const Shape& region, const coord_t line_di
 // Create a brand new tooth (gap fill or chain extension) at the given foot/dir/side.
 bool makeTooth(TrackedTooth& tooth, const Shape& region, const coord_t line_distance, const double ray_length)
 {
+    const Point2LL requested_foot = tooth.foot;
     const RibChord chord = ribChordNear(region, tooth.foot, tooth.dir, ray_length, 0.75 * static_cast<double>(line_distance));
     if (! chord.valid || chord.s_high - chord.s_low < 4.0 * tip_inset)
     {
@@ -863,7 +869,50 @@ bool makeTooth(TrackedTooth& tooth, const Shape& region, const coord_t line_dist
     tooth.apex = roundedPoint(tooth.foot.X + apex_dir.x * a, tooth.foot.Y + apex_dir.y * a);
     tooth.base = roundedPoint(tooth.foot.X - apex_dir.x * b, tooth.foot.Y - apex_dir.y * b);
     tooth.foot = roundedPoint((tooth.apex.X + tooth.base.X) / 2.0, (tooth.apex.Y + tooth.base.Y) / 2.0);
+
+    // Reject the tooth when re-centering onto the chord has thrown its foot far away from the
+    // requested position (the rib looked through an opening into a wide area, e.g. across the
+    // center of a star-shaped region). Such runaway teeth do not close the gap they were created
+    // for, so the same gap would spawn ever more teeth on every following layer, which used to
+    // let the tooth count (and the slicing time per layer) grow exponentially.
+    const double displacement = std::hypot(static_cast<double>(tooth.foot.X - requested_foot.X), static_cast<double>(tooth.foot.Y - requested_foot.Y));
+    if (displacement > 0.75 * static_cast<double>(line_distance))
+    {
+        return false;
+    }
     return true;
+}
+
+// Drop teeth whose feet have drifted closer than half a pitch to their predecessor. Without
+// this, teeth accumulate without bound: the per-layer re-centering of the feet compresses the
+// spacing on one side of a gap, the gap re-opens on the other side and is re-filled with new
+// teeth on every layer, so the tooth count (and with it the time per layer) keeps growing.
+void pruneCrowdedTeeth(ToothChain& chain, const coord_t line_distance)
+{
+    const double min_spacing = 0.5 * static_cast<double>(line_distance);
+    std::vector<TrackedTooth> kept;
+    for (const TrackedTooth& tooth : chain.teeth)
+    {
+        if (! kept.empty())
+        {
+            const double distance = std::hypot(static_cast<double>(tooth.foot.X - kept.back().foot.X), static_cast<double>(tooth.foot.Y - kept.back().foot.Y));
+            if (distance < min_spacing)
+            {
+                continue;
+            }
+        }
+        kept.push_back(tooth);
+    }
+    if (chain.closed && kept.size() >= 2)
+    {
+        const double wrap_distance
+            = std::hypot(static_cast<double>(kept.back().foot.X - kept.front().foot.X), static_cast<double>(kept.back().foot.Y - kept.front().foot.Y));
+        if (wrap_distance < min_spacing)
+        {
+            kept.pop_back();
+        }
+    }
+    chain.teeth = std::move(kept);
 }
 
 // Drop teeth which break the left/right alternation (this can happen when a tooth in between
@@ -1106,6 +1155,7 @@ std::vector<ToothChain> deriveChains(const std::vector<ToothChain>& previous, co
 
     for (ToothChain& chain : derived)
     {
+        pruneCrowdedTeeth(chain, line_distance);
         fixParity(chain);
         smoothDirections(chain);
         fillGaps(chain, region, line_distance, ray_length);
@@ -1243,6 +1293,11 @@ TriangleWaveEpicTrackingProvider::TriangleWaveEpicTrackingProvider(const std::ve
 
     layer_waves_.resize(layer_outlines.size());
 
+#ifdef TW_EPIC_BENCH
+    const auto bench_start = std::chrono::steady_clock::now();
+    auto bench_last = bench_start;
+#endif
+
     // Build the layers bottom up. Only the first layer (and any part which newly appears on a
     // higher layer) runs the full skeleton pipeline; every other layer is DERIVED tooth by tooth
     // from the layer below, changing as little as possible: rib lines stay in place, only the
@@ -1294,6 +1349,24 @@ TriangleWaveEpicTrackingProvider::TriangleWaveEpicTrackingProvider(const std::ve
 
         layer_waves_[layer_idx] = std::move(waves);
         chains = std::move(layer_chains);
+
+#ifdef TW_EPIC_BENCH
+        const auto bench_now = std::chrono::steady_clock::now();
+        size_t teeth_count = 0;
+        for (const ToothChain& c : chains)
+        {
+            teeth_count += c.teeth.size();
+        }
+        std::fprintf(
+            stderr,
+            "layer %zu: %.1f ms (total %.1f s), chains %zu, teeth %zu\n",
+            layer_idx,
+            std::chrono::duration<double, std::milli>(bench_now - bench_last).count(),
+            std::chrono::duration<double>(bench_now - bench_start).count(),
+            chains.size(),
+            teeth_count);
+        bench_last = bench_now;
+#endif
     }
 }
 
