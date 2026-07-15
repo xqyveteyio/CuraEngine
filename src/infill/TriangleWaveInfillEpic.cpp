@@ -905,8 +905,7 @@ void pruneCrowdedTeeth(ToothChain& chain, const coord_t line_distance)
     }
     if (chain.closed && kept.size() >= 2)
     {
-        const double wrap_distance
-            = std::hypot(static_cast<double>(kept.back().foot.X - kept.front().foot.X), static_cast<double>(kept.back().foot.Y - kept.front().foot.Y));
+        const double wrap_distance = std::hypot(static_cast<double>(kept.back().foot.X - kept.front().foot.X), static_cast<double>(kept.back().foot.Y - kept.front().foot.Y));
         if (wrap_distance < min_spacing)
         {
             kept.pop_back();
