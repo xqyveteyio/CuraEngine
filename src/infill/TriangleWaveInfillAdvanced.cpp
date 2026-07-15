@@ -438,7 +438,8 @@ double wallDistance(const Shape& region, const Point2LL& p, const Vec2d& directi
 // Build the triangle wave for one limb: sample rib positions at an even spacing (close to the
 // requested line distance) along the skeleton path, and put the apexes alternately on the left
 // and right wall, perpendicular to the local skeleton direction.
-OpenLinesSet buildRibWave(const PathSampler& sampler, const double s_begin, const double s_end, const bool closed, const Shape& region, const coord_t line_distance, const double ray_length)
+OpenLinesSet
+    buildRibWave(const PathSampler& sampler, const double s_begin, const double s_end, const bool closed, const Shape& region, const coord_t line_distance, const double ray_length)
 {
     OpenLinesSet wave;
     const double span = closed ? sampler.length() : s_end - s_begin;
