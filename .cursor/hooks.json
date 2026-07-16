@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [
+      { "command": "python3 /home/keyboard/Documents/GitHub/cursor-cost-count/main.py" }
+    ],
+    "stop": [
+      { "command": "python3 /home/keyboard/Documents/GitHub/cursor-cost-count/main.py" }
+    ],
+    "subagentStart": [
+      { "command": "python3 /home/keyboard/Documents/GitHub/cursor-cost-count/main.py" }
+    ],
+    "subagentStop": [
+      { "command": "python3 /home/keyboard/Documents/GitHub/cursor-cost-count/main.py" }
+    ]
+  }
+}
