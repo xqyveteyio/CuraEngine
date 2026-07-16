@@ -39,6 +39,111 @@ namespace
 // vertex itself and the tips stay sharp.
 constexpr coord_t tip_inset = 20;
 
+struct Vec2d
+{
+    double x;
+    double y;
+};
+
+Point2LL roundedPoint(const double x, const double y)
+{
+    return { std::llrint(x), std::llrint(y) };
+}
+
+// ================================ region partition & filtering ================================
+
+// A region too small to bother filling: it cannot hold even a couple of teeth of the wave, or it
+// is too narrow everywhere for a tooth of useful height. Such scraps (tiny islands, slivers cut
+// off at junctions, the last few tapering layers of a feature) produce noisy, unstable waves that
+// tend to cross each other, so they are abandoned entirely instead of filled.
+bool regionTooSmall(const Shape& region, const coord_t line_distance)
+{
+    const double pitch = static_cast<double>(line_distance);
+    if (std::abs(region.area()) < 0.05 * pitch * pitch)
+    {
+        return true;
+    }
+    return region.offset(-line_distance / 16).empty();
+}
+
+// Partition one connected region into multiple independent fill regions, with no main/sub
+// hierarchy. A morphological opening (inwards + outwards offset by half a pitch) removes every
+// feature narrower than one pitch; the remaining wide bodies each become a region, and every
+// removed protrusion or neck becomes a region of its own as well. Small scraps of the opening
+// (e.g. the corners it cannot reach into) are merged back into the bodies instead. Each region
+// is subsequently filled independently, or abandoned when too small.
+void partitionIndependentRegions(const SingleShape& part, const coord_t line_distance, std::vector<SingleShape>& regions, std::vector<bool>& is_appendage)
+{
+    const coord_t r = line_distance / 2;
+    const double pitch = static_cast<double>(line_distance);
+    Shape core = part.offset(-r, ClipperLib::jtRound).offset(r, ClipperLib::jtRound).intersection(Shape(part));
+    if (core.empty())
+    {
+        // The whole region is narrower than one pitch; keep it as one (probably abandoned) region.
+        regions.push_back(part);
+        is_appendage.push_back(true);
+        return;
+    }
+
+    std::vector<SingleShape> appendages;
+    bool merged_scraps = false;
+    for (SingleShape& piece : part.difference(core).splitIntoParts())
+    {
+        // Opening residue (corner fillets, thin slivers hugging the walls, offset noise) is not a
+        // real feature: give it back to the body so the wave still reaches into the corners. Real
+        // protrusions are both reasonably large and reasonably wide.
+        const bool scrap = std::abs(piece.area()) < 0.2 * pitch * pitch || piece.offset(-line_distance / 8).empty();
+        if (scrap)
+        {
+            for (const Polygon& poly : piece)
+            {
+                core.push_back(poly);
+            }
+            merged_scraps = true;
+        }
+        else
+        {
+            appendages.push_back(std::move(piece));
+        }
+    }
+    if (merged_scraps)
+    {
+        core = core.unionPolygons();
+    }
+
+    for (SingleShape& sub : core.splitIntoParts())
+    {
+        regions.push_back(std::move(sub));
+        is_appendage.push_back(false);
+    }
+    for (SingleShape& sub : appendages)
+    {
+        regions.push_back(std::move(sub));
+        is_appendage.push_back(true);
+    }
+}
+
+#ifdef TW_EPIC_DEBUG
+// Dump one connected region (outer boundary plus holes) as a single SVG path of the given class.
+void debugDumpRegion(const Shape& region, const char* css_class)
+{
+    if (tw_epic_debug::svg == nullptr)
+    {
+        return;
+    }
+    std::fprintf(tw_epic_debug::svg, "<path class='%s' fill-rule='evenodd' d='", css_class);
+    for (const Polygon& poly : region)
+    {
+        for (size_t i = 0; i < poly.size(); ++i)
+        {
+            std::fprintf(tw_epic_debug::svg, "%c%lld %lld ", (i == 0) ? 'M' : 'L', static_cast<long long>(poly[i].X), static_cast<long long>(poly[i].Y));
+        }
+        std::fprintf(tw_epic_debug::svg, "Z ");
+    }
+    std::fprintf(tw_epic_debug::svg, "'/>\n");
+}
+#endif
+
 // ================================ straight wave (fallback & junction patches) ================================
 
 // The apex X position of column k. The columns lie on a fixed grid in absolute (model)
@@ -379,17 +484,6 @@ std::vector<SkeletonBranch> extractBranches(const MedialAxisGraph& graph, std::v
 
 // ================================ skeleton driven wave ================================
 
-struct Vec2d
-{
-    double x;
-    double y;
-};
-
-Point2LL roundedPoint(const double x, const double y)
-{
-    return { std::llrint(x), std::llrint(y) };
-}
-
 // One tooth of a tracked wave. The tooth is defined by its rib: the line through 'foot' along
 // 'dir'. The apex (the wave vertex) lies on that line towards dir * side, the base is the chord
 // end on the opposite wall. In tracking mode each layer derives its teeth 1:1 from the layer
@@ -425,7 +519,8 @@ OpenLinesSet buildWave(const std::map<int64_t, std::pair<coord_t, coord_t>>& ext
     ToothChain chain;
     auto flush_wave = [&]()
     {
-        if (wave_points.size() >= 2)
+        // Two apexes alone are only a single diagonal flank, not a printable zigzag run.
+        if (wave_points.size() >= 3)
         {
             wave.push_back(OpenPolyline{ wave_points });
         }
@@ -508,9 +603,11 @@ public:
         return roundedPoint(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t);
     }
 
-    Vec2d tangentAt(const double s) const
+    // Direction of the path around s, measured by central difference over 2h. A larger h smooths
+    // out local wiggles of the medial axis (e.g. remnants of pruned side stems), which is
+    // essential for stable rib directions.
+    Vec2d tangentAt(const double s, const double h = 100.0) const
     {
-        constexpr double h = 100.0; // central difference step [μm]
         const Point2LL before = at(closed_ ? s - h : std::max(s - h, 0.0));
         const Point2LL after = at(closed_ ? s + h : std::min(s + h, length()));
         const double dx = static_cast<double>(after.X - before.X);
@@ -670,6 +767,71 @@ Polygon cutBand(const Shape& region, const Point2LL& p, const Vec2d& tangent, co
     return band;
 }
 
+// Straight-axis fallback fill for junction patches only (not tracked between layers).
+OpenLinesSet buildJunctionPatchWaves(const SingleShape& part, const coord_t line_distance)
+{
+    OpenLinesSet waves;
+
+    MedialAxisGraph graph = extractMedialAxis(part);
+    pruneSpurs(graph, line_distance);
+    pruneStubBranches(graph, line_distance);
+    std::vector<size_t> junctions;
+    const std::vector<SkeletonBranch> branches = extractBranches(graph, junctions);
+    if (junctions.empty())
+    {
+        return waves;
+    }
+
+    const AABB part_box(part);
+    const double ray_length = vSizeMM(part_box.max_ - part_box.min_) * 1000.0 + static_cast<double>(line_distance);
+    Shape cut_bands;
+    const double min_limb_length = static_cast<double>(line_distance) / 2.0;
+
+    for (const SkeletonBranch& branch : branches)
+    {
+        PathSampler sampler(branch.points, branch.closed);
+        if (branch.closed)
+        {
+            continue;
+        }
+        const double cut_start = branch.start_at_junction ? static_cast<double>(graph.nodes[branch.start_node].clearance) : 0.0;
+        const double cut_end = branch.end_at_junction ? static_cast<double>(graph.nodes[branch.end_node].clearance) : 0.0;
+        if (sampler.length() < cut_start + cut_end + min_limb_length)
+        {
+            continue;
+        }
+        if (branch.start_at_junction)
+        {
+            cut_bands.push_back(cutBand(part, sampler.at(cut_start), sampler.tangentAt(cut_start), line_distance, ray_length));
+        }
+        if (branch.end_at_junction)
+        {
+            const double s_end = sampler.length() - cut_end;
+            cut_bands.push_back(cutBand(part, sampler.at(s_end), sampler.tangentAt(s_end), line_distance, ray_length));
+        }
+    }
+
+    const Shape remaining = cut_bands.empty() ? Shape(part) : part.difference(cut_bands.unionPolygons());
+    const std::vector<SingleShape> sub_parts = remaining.splitIntoParts();
+    for (size_t i = 0; i < sub_parts.size(); ++i)
+    {
+        bool is_patch = false;
+        for (const size_t junction : junctions)
+        {
+            if (sub_parts[i].inside(graph.nodes[junction].p, true))
+            {
+                is_patch = true;
+                break;
+            }
+        }
+        if (is_patch && ! regionTooSmall(sub_parts[i], line_distance))
+        {
+            waves.push_back(buildStraightWave(sub_parts[i], line_distance, nullptr));
+        }
+    }
+    return waves;
+}
+
 // Skeleton driven triangle wave for one connected part of the template region:
 // - extract and prune the medial axis,
 // - sever the region at every skeleton junction ("block off" the branch point), which splits it
@@ -677,13 +839,18 @@ Polygon cutBand(const Shape& region, const Point2LL& p, const Vec2d& tangent, co
 // - run one wave along the skeleton of each limb,
 // - fill the junction patches with a separate small straight wave.
 // Returns an empty set when the skeleton degenerates (caller falls back to the straight wave).
-OpenLinesSet buildSkeletonWaves(const SingleShape& part, const coord_t line_distance, std::vector<ToothChain>* chains_out = nullptr)
+// \p prune_stubs is disabled for small appendage regions: their whole skeleton is one narrow stem
+// which the stub pruning would erase, and the wave has to run along exactly that stem.
+OpenLinesSet buildSkeletonWaves(const SingleShape& part, const coord_t line_distance, std::vector<ToothChain>* chains_out = nullptr, const bool prune_stubs = true)
 {
     OpenLinesSet waves;
 
     MedialAxisGraph graph = extractMedialAxis(part);
     pruneSpurs(graph, line_distance);
-    pruneStubBranches(graph, line_distance);
+    if (prune_stubs)
+    {
+        pruneStubBranches(graph, line_distance);
+    }
     std::vector<size_t> junctions;
     std::vector<SkeletonBranch> branches = extractBranches(graph, junctions);
     if (branches.empty())
@@ -767,6 +934,7 @@ OpenLinesSet buildSkeletonWaves(const SingleShape& part, const coord_t line_dist
     }
 #endif
     std::vector<bool> is_patch(sub_parts.size(), false);
+    std::vector<bool> skipped(sub_parts.size(), false);
     for (size_t i = 0; i < sub_parts.size(); ++i)
     {
         for (const size_t junction : junctions)
@@ -777,7 +945,17 @@ OpenLinesSet buildSkeletonWaves(const SingleShape& part, const coord_t line_dist
                 break;
             }
         }
+        // Abandon pieces of the partition which are too small to fill (competitor style): they
+        // only produce unstable waves which drift and cross between layers.
+        skipped[i] = regionTooSmall(sub_parts[i], line_distance);
     }
+
+#ifdef TW_EPIC_DEBUG
+    for (size_t i = 0; i < sub_parts.size(); ++i)
+    {
+        debugDumpRegion(sub_parts[i], skipped[i] ? "region-skipped" : (is_patch[i] ? "region-patch" : "region-limb"));
+    }
+#endif
 
     auto find_part = [&sub_parts](const Point2LL& p) -> int
     {
@@ -844,16 +1022,28 @@ OpenLinesSet buildSkeletonWaves(const SingleShape& part, const coord_t line_dist
         {
             continue; // limb collapsed into a patch after cutting; the patch fill covers it
         }
+        if (skipped[part_idx])
+        {
+            continue; // limb region too small: abandoned, no fill at all
+        }
 
-        waves.push_back(buildRibWave(plan.sampler, plan.s_begin, plan.s_end, branch.closed, sub_parts[part_idx], line_distance, ray_length, chains_out));
+        OpenLinesSet limb_wave = buildRibWave(plan.sampler, plan.s_begin, plan.s_end, branch.closed, sub_parts[part_idx], line_distance, ray_length, chains_out);
+        if (chains_out == nullptr)
+        {
+            // In tracking mode the limb waves are rendered from the recorded chains instead (after
+            // the crossing cleanup); returning them too would print every limb twice.
+            waves.push_back(limb_wave);
+        }
     }
 
     // Finally fill the blocked-off junction patches with their own separate wave.
     for (size_t i = 0; i < sub_parts.size(); ++i)
     {
-        if (is_patch[i])
+        if (is_patch[i] && ! skipped[i])
         {
-            waves.push_back(buildStraightWave(sub_parts[i], line_distance, chains_out));
+            // Do not record patch teeth for tracking: tiny 2-tooth pocket chains persist across
+            // layers and show up as isolated diagonal segments between the main corridor waves.
+            waves.push_back(buildStraightWave(sub_parts[i], line_distance, nullptr));
         }
     }
 
@@ -942,7 +1132,25 @@ bool updateTooth(TrackedTooth& tooth, const Shape& region, const coord_t line_di
 
     tooth.apex = roundedPoint(tooth.foot.X + apex_dir.x * a_new, tooth.foot.Y + apex_dir.y * a_new);
     tooth.base = roundedPoint(tooth.foot.X - apex_dir.x * b_new, tooth.foot.Y - apex_dir.y * b_new);
-    tooth.foot = roundedPoint((tooth.apex.X + tooth.base.X) / 2.0, (tooth.apex.Y + tooth.base.Y) / 2.0);
+
+    // Re-center the anchor onto the chord midpoint so the tooth follows a corridor which slowly
+    // migrates sideways over the layers (otherwise the anchors get left behind and die one after
+    // the other, thinning the wave out). The movement is clamped per layer: an uncontrolled
+    // re-centering used to accumulate into crossing apex polylines ("flying" segments) at open
+    // chain ends whenever a rib looked through an opening.
+    const double max_shift = static_cast<double>(line_distance) / 4.0;
+    const Point2LL centered = roundedPoint((tooth.apex.X + tooth.base.X) / 2.0, (tooth.apex.Y + tooth.base.Y) / 2.0);
+    const double shift_x = static_cast<double>(centered.X - tooth.foot.X);
+    const double shift_y = static_cast<double>(centered.Y - tooth.foot.Y);
+    const double shift = std::hypot(shift_x, shift_y);
+    if (shift <= max_shift)
+    {
+        tooth.foot = centered;
+    }
+    else
+    {
+        tooth.foot = roundedPoint(tooth.foot.X + shift_x / shift * max_shift, tooth.foot.Y + shift_y / shift * max_shift);
+    }
     return true;
 }
 
@@ -1006,6 +1214,73 @@ void pruneCrowdedTeeth(ToothChain& chain, const coord_t line_distance)
     chain.teeth = std::move(kept);
 }
 
+double orient(const Point2LL& o, const Point2LL& a, const Point2LL& b)
+{
+    return static_cast<double>(a.X - o.X) * static_cast<double>(b.Y - o.Y) - static_cast<double>(a.Y - o.Y) * static_cast<double>(b.X - o.X);
+}
+
+// Proper (interior) intersection of the segments p1-p2 and p3-p4.
+bool segmentsCross(const Point2LL& p1, const Point2LL& p2, const Point2LL& p3, const Point2LL& p4)
+{
+    const double d1 = orient(p3, p4, p1);
+    const double d2 = orient(p3, p4, p2);
+    const double d3 = orient(p1, p2, p3);
+    const double d4 = orient(p1, p2, p4);
+    return d1 != 0.0 && d2 != 0.0 && d3 != 0.0 && d4 != 0.0 && ((d1 > 0.0) != (d2 > 0.0)) && ((d3 > 0.0) != (d4 > 0.0));
+}
+
+// Anchor drift on curved corridors can make teeth leapfrog their neighbors along the chain; the
+// apex polyline then crosses itself, which prints as "flying" strokes shooting through the wave.
+// Detect the self-intersections and drop the doubled-back teeth until the polyline is planar.
+void repairCrossings(ToothChain& chain)
+{
+    for (int guard = 0; guard < 64; ++guard)
+    {
+        const size_t n = chain.teeth.size();
+        if (n < 3)
+        {
+            return;
+        }
+        const size_t seg_count = chain.closed ? n : n - 1;
+        size_t drop_begin = 0;
+        size_t drop_end = 0; // inclusive
+        bool found = false;
+        for (size_t i = 0; i + 1 < seg_count && ! found; ++i)
+        {
+            for (size_t j = i + 2; j < seg_count; ++j)
+            {
+                if (chain.closed && i == 0 && j == seg_count - 1)
+                {
+                    continue; // adjacent across the wrap-around
+                }
+                if (segmentsCross(chain.teeth[i].apex, chain.teeth[(i + 1) % n].apex, chain.teeth[j].apex, chain.teeth[(j + 1) % n].apex))
+                {
+                    // The teeth strictly between the two segments doubled back. Far-apart
+                    // crossings (degenerate geometry) only sacrifice one tooth per iteration
+                    // instead of half the chain.
+                    if (j - i <= 6)
+                    {
+                        drop_begin = i + 1;
+                        drop_end = j;
+                    }
+                    else
+                    {
+                        drop_begin = j;
+                        drop_end = j;
+                    }
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (! found)
+        {
+            return;
+        }
+        chain.teeth.erase(chain.teeth.begin() + drop_begin, chain.teeth.begin() + drop_end + 1);
+    }
+}
+
 // Drop teeth which break the left/right alternation (this can happen when a tooth in between
 // died); closed chains additionally need an even count for the wave to close onto itself.
 void fixParity(ToothChain& chain)
@@ -1033,7 +1308,7 @@ void fixParity(ToothChain& chain)
 // followed without ever changing the pattern abruptly.
 void smoothDirections(ToothChain& chain)
 {
-    constexpr double max_rotation = 0.06; // [rad] per layer
+    constexpr double max_rotation = 0.25; // [rad] per layer; must outpace the fastest expected model twist
     const size_t n = chain.teeth.size();
     if (n < 3)
     {
@@ -1265,13 +1540,434 @@ std::vector<ToothChain> deriveChains(const std::vector<ToothChain>& previous, co
         extendEnds(chain, region, line_distance, ray_length, all_feet);
     }
 
+    // Untangle any apex polyline which crosses itself (teeth leapfrogged by drift). Removing
+    // teeth can break the side alternation, and re-fixing the parity can in rare cases fold the
+    // polyline again, so run one more repair pass afterwards.
+    for (ToothChain& chain : derived)
+    {
+        repairCrossings(chain);
+        fixParity(chain);
+        repairCrossings(chain);
+    }
+
     std::erase_if(
         derived,
         [](const ToothChain& chain)
         {
             return chain.teeth.size() < 2;
         });
+    std::erase_if(
+        derived,
+        [](const ToothChain& chain)
+        {
+            // Orphaned pocket chains from older runs / edge cases: an open 2-tooth chain is only
+            // a single flank and reads as a "flying" diagonal once clipped.
+            return ! chain.closed && chain.teeth.size() == 2;
+        });
     return derived;
+}
+
+double pointSegmentDistance(const Point2LL& p, const Point2LL& a, const Point2LL& b)
+{
+    const double dx = static_cast<double>(b.X - a.X);
+    const double dy = static_cast<double>(b.Y - a.Y);
+    const double l2 = dx * dx + dy * dy;
+    double t = 0.0;
+    if (l2 > 0.0)
+    {
+        t = std::clamp((static_cast<double>(p.X - a.X) * dx + static_cast<double>(p.Y - a.Y) * dy) / l2, 0.0, 1.0);
+    }
+    return std::hypot(static_cast<double>(p.X - a.X) - t * dx, static_cast<double>(p.Y - a.Y) - t * dy);
+}
+
+// Drop static polylines which merely duplicate a stretch of the tracked wave. The static fills
+// are re-derived on every layer, and when their classification flickers for a layer, a patch or
+// appendage wave can appear right on top of the corridor already covered by a tracked chain.
+// Such a duplicate runs nearly parallel to the wave it copies, so it produces no proper crossing
+// for removeCrossingTeeth to catch - but it prints as a doubled, denser zigzag. Legitimate static
+// fills live in their own region and keep well over half a pitch of distance to the tracked wave.
+void removeRedundantStaticWaves(const OpenLinesSet& tracked_waves, OpenLinesSet& static_waves, const coord_t line_distance)
+{
+    const double near_distance = static_cast<double>(line_distance) / 3.0;
+    for (size_t p = static_waves.size(); p > 0; --p)
+    {
+        const OpenPolyline& polyline = static_waves[p - 1];
+        std::vector<Point2LL> samples(polyline.begin(), polyline.end());
+        for (size_t i = 0; i + 1 < polyline.size(); ++i)
+        {
+            samples.push_back(roundedPoint((polyline[i].X + polyline[i + 1].X) / 2.0, (polyline[i].Y + polyline[i + 1].Y) / 2.0));
+        }
+        size_t near_count = 0;
+        for (const Point2LL& sample : samples)
+        {
+            double best = std::numeric_limits<double>::max();
+            for (const OpenPolyline& wave : tracked_waves)
+            {
+                for (size_t i = 0; i + 1 < wave.size() && best >= near_distance; ++i)
+                {
+                    best = std::min(best, pointSegmentDistance(sample, wave[i], wave[i + 1]));
+                }
+            }
+            near_count += (best < near_distance) ? 1 : 0;
+        }
+        if (near_count * 5 >= samples.size() * 2) // at least 40% of the polyline hugs the tracked wave
+        {
+            static_waves.removeAt(p - 1);
+        }
+    }
+}
+
+// Remove fold-backs within one chain: a short run of teeth whose apexes lie (almost) on top of
+// the apexes of another, longer stretch of the same chain. Such folds appear when a closed chain
+// around a pocket loses the pocket (the hole closes over the layers) and its two sides collapse
+// onto each other, or when gap-filling regrows a dead stretch into territory the chain already
+// covers. The doubled stretch prints as a denser zigzag; crossing removal does not catch it
+// because the duplicate runs parallel to the original instead of crossing it.
+void removeFoldbackTeeth(ToothChain& chain, const coord_t line_distance)
+{
+    const double near_distance = static_cast<double>(line_distance) / 3.0;
+    for (int guard = 0; guard < 100; ++guard)
+    {
+        const size_t n = chain.teeth.size();
+        if (n < 6)
+        {
+            return;
+        }
+        const auto index_gap = [&](const size_t i, const size_t j) -> size_t
+        {
+            const size_t d = (i > j) ? i - j : j - i;
+            return chain.closed ? std::min(d, n - d) : d;
+        };
+        // Collapse degenerate flanks first: two consecutive apexes (nearly) on the same spot are
+        // one tooth printed twice.
+        bool collapsed = false;
+        for (size_t i = n; i > 1; --i)
+        {
+            const Point2LL& a = chain.teeth[i - 1].apex;
+            const Point2LL& b = chain.teeth[i - 2].apex;
+            if (std::hypot(static_cast<double>(a.X - b.X), static_cast<double>(a.Y - b.Y)) < static_cast<double>(line_distance) / 5.0)
+            {
+                chain.teeth.erase(chain.teeth.begin() + static_cast<std::ptrdiff_t>(i - 1));
+                collapsed = true;
+            }
+        }
+        if (collapsed)
+        {
+            continue; // re-run the scan on the cleaned chain
+        }
+
+        // A fold-back can be out of phase with the stretch it duplicates (its apexes touch the
+        // other stretch's flanks rather than its apexes), so measure apex-to-flank distance.
+        std::vector<bool> marked(n, false);
+        const size_t flank_count = chain.closed ? n : n - 1;
+        for (size_t i = 0; i < n; ++i)
+        {
+            for (size_t j = 0; j < flank_count; ++j)
+            {
+                const size_t j2 = (j + 1) % n;
+                if (index_gap(i, j) <= 1 || index_gap(i, j2) <= 1)
+                {
+                    continue; // the apex belongs to these flanks (or borders them directly)
+                }
+                if (pointSegmentDistance(chain.teeth[i].apex, chain.teeth[j].apex, chain.teeth[j2].apex) < near_distance)
+                {
+                    marked[i] = true;
+                }
+            }
+        }
+
+        // Folds develop at the free ends of a chain (regrowth after a split, or a wave leaving
+        // and re-entering the region): peel marked teeth off the open ends. Both the fold and
+        // the stretch it duplicates get marked, but the mid-chain stretch is spared - only the
+        // dispensable folded end is dropped.
+        bool changed = false;
+        if (! chain.closed)
+        {
+            while (! chain.teeth.empty() && marked[chain.teeth.size() - 1])
+            {
+                marked.pop_back();
+                chain.teeth.pop_back();
+                changed = true;
+            }
+            while (! chain.teeth.empty() && marked.front())
+            {
+                marked.erase(marked.begin());
+                chain.teeth.erase(chain.teeth.begin());
+                changed = true;
+            }
+        }
+        else
+        {
+            // A closed chain has no ends; there the fold is two sides of a vanished pocket
+            // collapsed onto each other. Drop the shortest maximal run of marked teeth.
+            std::vector<std::pair<size_t, size_t>> runs; // (start, length)
+            for (size_t i = 0; i < n; ++i)
+            {
+                if (! marked[i] || marked[(i + n - 1) % n])
+                {
+                    continue;
+                }
+                size_t len = 0;
+                while (len < n && marked[(i + len) % n])
+                {
+                    ++len;
+                }
+                runs.push_back({ i, len });
+            }
+            if (runs.size() >= 2)
+            {
+                const auto shortest = std::min_element(
+                    runs.begin(),
+                    runs.end(),
+                    [](const auto& lhs, const auto& rhs)
+                    {
+                        return lhs.second < rhs.second;
+                    });
+                std::vector<TrackedTooth> kept;
+                kept.reserve(n - shortest->second);
+                for (size_t i = 0; i < n; ++i)
+                {
+                    const size_t offset = (i + n - shortest->first) % n;
+                    if (offset >= shortest->second)
+                    {
+                        kept.push_back(chain.teeth[i]);
+                    }
+                }
+                chain.teeth = std::move(kept);
+                if (chain.teeth.size() < 3)
+                {
+                    chain.closed = false;
+                }
+                changed = true;
+            }
+        }
+        if (! changed)
+        {
+            return;
+        }
+    }
+}
+
+// Split chains whose apex polyline leaves the region: printing clips such a wave at the wall,
+// so the stored chain would place a flank through outside space (a "flying line", or - when the
+// wave happens to re-enter right next to itself - a doubled remnant hugging its own earlier
+// stretch). Splitting at the exits keeps each printed piece an honest chain, and the too-short
+// leftovers are culled instead of printed.
+void splitChainsAtRegionExits(std::vector<ToothChain>& chains, const Shape& region)
+{
+    std::vector<ToothChain> result;
+    for (ToothChain& chain : chains)
+    {
+        const size_t n = chain.teeth.size();
+        const size_t flank_count = chain.closed ? n : (n == 0 ? 0 : n - 1);
+        std::vector<bool> flank_ok(n, true);
+        bool any_exit = false;
+        for (size_t i = 0; i < flank_count; ++i)
+        {
+            const Point2LL& a = chain.teeth[i].apex;
+            const Point2LL& b = chain.teeth[(i + 1) % n].apex;
+            for (const double t : { 0.25, 0.5, 0.75 })
+            {
+                const Point2LL sample = roundedPoint(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t);
+                if (! region.inside(sample, true))
+                {
+                    flank_ok[i] = false;
+                    any_exit = true;
+                    break;
+                }
+            }
+        }
+        if (! any_exit)
+        {
+            result.push_back(std::move(chain));
+            continue;
+        }
+        // Cut the chain apart behind every exiting flank (circularly for closed chains).
+        size_t start = 0;
+        if (chain.closed)
+        {
+            while (start < n && flank_ok[start])
+            {
+                ++start;
+            }
+            ++start; // first tooth after the first broken flank
+        }
+        ToothChain fragment;
+        for (size_t k = 0; k < n; ++k)
+        {
+            const size_t i = (start + k) % n;
+            fragment.teeth.push_back(chain.teeth[i]);
+            if (! flank_ok[i])
+            {
+                result.push_back(std::move(fragment));
+                fragment = ToothChain{};
+            }
+        }
+        if (! fragment.teeth.empty())
+        {
+            result.push_back(std::move(fragment));
+        }
+    }
+    std::erase_if(
+        result,
+        [](const ToothChain& chain)
+        {
+            return chain.teeth.size() < 3; // remnants too short to print as a zigzag
+        });
+    chains = std::move(result);
+}
+
+// Drop small chain fragments which run on top of a bigger chain. When teeth die mid-chain the
+// chain splits into fragments, and the ends of two fragments can regrow (fillGaps / extendEnds)
+// into each other's territory until a splinter fragment duplicates a stretch of the main chain,
+// printing as a doubled, denser zigzag. The removal persists into the tracking state.
+void removeRedundantChains(std::vector<ToothChain>& chains, const coord_t line_distance)
+{
+    const double near_distance = static_cast<double>(line_distance) / 3.0;
+    for (size_t small = chains.size(); small > 0; --small)
+    {
+        ToothChain& chain = chains[small - 1];
+        for (size_t big = 0; big < chains.size(); ++big)
+        {
+            if (big == small - 1 || chains[big].teeth.size() <= chain.teeth.size())
+            {
+                continue;
+            }
+            const std::vector<TrackedTooth>& big_teeth = chains[big].teeth;
+            const size_t big_flanks = chains[big].closed ? big_teeth.size() : big_teeth.size() - 1;
+
+            // Delete the individual teeth which hug the bigger chain's wave. Deleting per tooth
+            // (instead of per chain) still works when only a part of the fragment overlaps and
+            // the rest idles elsewhere, e.g. outside the current region (clipped, invisible).
+            std::erase_if(
+                chain.teeth,
+                [&](const TrackedTooth& tooth)
+                {
+                    for (size_t i = 0; i < big_flanks; ++i)
+                    {
+                        if (pointSegmentDistance(tooth.apex, big_teeth[i].apex, big_teeth[(i + 1) % big_teeth.size()].apex) < near_distance)
+                        {
+                            return true;
+                        }
+                    }
+                    return false;
+                });
+            if (chain.closed && chain.teeth.size() < 3)
+            {
+                chain.closed = false;
+            }
+        }
+    }
+    std::erase_if(
+        chains,
+        [](const ToothChain& chain)
+        {
+            return chain.teeth.size() < 3;
+        });
+}
+
+// Hard guarantee against "flying" crossing lines: after a layer's chains are derived, drop the
+// teeth whose wave flanks cross any other flank (of any chain, or of the untracked static fills)
+// until the layer is crossing-free. Tooth removal persists into the tracking state, so a tangle
+// is eliminated once instead of reappearing on every following layer. Tracking derivation can
+// produce such tangles in strongly curved corridors: teeth die and get re-inserted with
+// interpolated rib directions, and until the directions re-align over a few layers the apex
+// ordering of neighboring teeth can swap.
+void removeCrossingTeeth(std::vector<ToothChain>& chains, OpenLinesSet& static_waves)
+{
+    struct Segment
+    {
+        Point2LL a;
+        Point2LL b;
+        int chain{ -1 }; // -1: static
+        size_t tooth_a{ 0 }; // tooth indices, or the polyline index for static segments
+        size_t tooth_b{ 0 };
+    };
+
+    for (int guard = 0; guard < 1000; ++guard)
+    {
+        std::vector<Segment> segments;
+        for (size_t p = 0; p < static_waves.size(); ++p)
+        {
+            const OpenPolyline& polyline = static_waves[p];
+            for (size_t i = 0; i + 1 < polyline.size(); ++i)
+            {
+                segments.push_back({ polyline[i], polyline[i + 1], -1, p, p });
+            }
+        }
+        for (size_t c = 0; c < chains.size(); ++c)
+        {
+            const std::vector<TrackedTooth>& teeth = chains[c].teeth;
+            const size_t pair_count = chains[c].closed ? teeth.size() : (teeth.empty() ? 0 : teeth.size() - 1);
+            for (size_t i = 0; i < pair_count; ++i)
+            {
+                const size_t j = (i + 1) % teeth.size();
+                segments.push_back({ teeth[i].apex, teeth[j].apex, static_cast<int>(c), i, j });
+            }
+        }
+
+        // Score every entity (a tracked tooth, or a whole static polyline) by the number of
+        // crossings it is involved in, then remove the single worst offender and re-check. A
+        // static fill which happens to overlap a tracked wave (the region partition or the
+        // junction patch classification flickered for one layer) crosses many flanks at once
+        // and thus accumulates the top score: the redundant static polyline is dropped in one
+        // step and the tracked chain survives intact, instead of being dismantled tooth by
+        // tooth (which used to leave a sparse, differently-phased fill on such layers).
+        std::map<std::pair<int, size_t>, int> scores;
+        for (size_t i = 0; i < segments.size(); ++i)
+        {
+            for (size_t j = i + 1; j < segments.size(); ++j)
+            {
+                const Segment& s = segments[i];
+                const Segment& t = segments[j];
+                if (s.chain >= 0 && s.chain == t.chain && (s.tooth_a == t.tooth_a || s.tooth_a == t.tooth_b || s.tooth_b == t.tooth_a || s.tooth_b == t.tooth_b))
+                {
+                    continue; // adjacent flanks of the same chain share a tooth
+                }
+                if (s.chain < 0 && t.chain < 0 && s.tooth_a == t.tooth_a)
+                {
+                    continue; // same static polyline: consecutive strokes may touch
+                }
+                if (segmentsCross(s.a, s.b, t.a, t.b))
+                {
+                    for (const Segment* seg : { &s, &t })
+                    {
+                        if (seg->chain >= 0)
+                        {
+                            scores[{ seg->chain, seg->tooth_a }] += 1;
+                            scores[{ seg->chain, seg->tooth_b }] += 1;
+                        }
+                        else
+                        {
+                            scores[{ -1, seg->tooth_a }] += 2; // same weight as the two teeth of a flank
+                        }
+                    }
+                }
+            }
+        }
+        if (scores.empty())
+        {
+            return; // crossing-free
+        }
+        const auto worst = std::max_element(
+            scores.begin(),
+            scores.end(),
+            [](const auto& lhs, const auto& rhs)
+            {
+                return lhs.second < rhs.second;
+            });
+        if (worst->first.first < 0)
+        {
+            static_waves.removeAt(worst->first.second);
+            continue;
+        }
+        ToothChain& chain = chains[worst->first.first];
+        chain.teeth.erase(chain.teeth.begin() + static_cast<std::ptrdiff_t>(worst->first.second));
+        if (chain.closed && chain.teeth.size() < 3)
+        {
+            chain.closed = false;
+        }
+    }
 }
 
 // The printed wave of a set of chains: the polyline through the apexes of each chain.
@@ -1280,7 +1976,8 @@ OpenLinesSet chainsToWaves(const std::vector<ToothChain>& chains)
     OpenLinesSet waves;
     for (const ToothChain& chain : chains)
     {
-        if (chain.teeth.size() < 2)
+        // Two apexes alone are only a single diagonal flank, not a printable zigzag run.
+        if (chain.teeth.size() < 3)
         {
             continue;
         }
@@ -1310,12 +2007,45 @@ OpenLinesSet buildWaves(const Shape& region, const coord_t line_distance)
     OpenLinesSet waves;
     for (const SingleShape& part : region.splitIntoParts())
     {
-        OpenLinesSet part_waves = buildSkeletonWaves(part, line_distance);
-        if (part_waves.empty())
+        // Partition the part into independent fill regions (bodies and protrusions alike, no
+        // hierarchy); each region is filled on its own, or abandoned when too small.
+        std::vector<SingleShape> regions;
+        std::vector<bool> appendage_flags;
+        partitionIndependentRegions(part, line_distance, regions, appendage_flags);
+        for (size_t i = 0; i < regions.size(); ++i)
         {
-            part_waves = buildStraightWave(part, line_distance);
+            if (regionTooSmall(regions[i], line_distance))
+            {
+#ifdef TW_EPIC_DEBUG
+                debugDumpRegion(regions[i], "region-skipped");
+#endif
+                continue; // region too small to fill: abandoned entirely
+            }
+            if (appendage_flags[i])
+            {
+                // An appendage is an equal fill region: it runs the same skeleton pipeline as any
+                // body region (without stub pruning, since its whole skeleton is one narrow stem).
+                OpenLinesSet appendage_wave = buildSkeletonWaves(regions[i], line_distance, nullptr, false);
+                if (appendage_wave.empty())
+                {
+                    appendage_wave = buildStraightWave(regions[i], line_distance);
+                }
+                waves.push_back(appendage_wave);
+#ifdef TW_EPIC_DEBUG
+                debugDumpRegion(regions[i], "region-appendage");
+#endif
+                continue;
+            }
+            OpenLinesSet region_waves = buildSkeletonWaves(regions[i], line_distance);
+            if (region_waves.empty())
+            {
+#ifdef TW_EPIC_DEBUG
+                debugDumpRegion(regions[i], "region-limb");
+#endif
+                region_waves = buildStraightWave(regions[i], line_distance);
+            }
+            waves.push_back(region_waves);
         }
-        waves.push_back(part_waves);
     }
     return waves;
 }
@@ -1401,14 +2131,82 @@ TriangleWaveEpicTrackingProvider::TriangleWaveEpicTrackingProvider(const std::ve
         rotated.applyMatrix(rotation_matrix_);
         rotated = rotated.unionPolygons();
 
+        // Partition the layer into independent fill regions (bodies and protrusions alike) and
+        // abandon the ones too small to fill. Only the body regions are tracked tooth by tooth:
+        // teeth living in an abandoned or severed region lose their material and die, so a
+        // feature tapering away over the last few layers stops being filled instead of producing
+        // degenerate waves. Appendage regions get their own independent wave, rebuilt per layer
+        // on the fixed absolute grid (so consecutive layers still line up).
+        Shape kept_regions;
+        OpenLinesSet appendage_waves;
+        for (const SingleShape& part : rotated.splitIntoParts())
+        {
+            std::vector<SingleShape> part_regions;
+            std::vector<bool> appendage_flags;
+            partitionIndependentRegions(part, line_distance, part_regions, appendage_flags);
+            for (size_t i = 0; i < part_regions.size(); ++i)
+            {
+                if (regionTooSmall(part_regions[i], line_distance))
+                {
+                    continue;
+                }
+                if (appendage_flags[i])
+                {
+                    OpenLinesSet appendage_wave = buildSkeletonWaves(part_regions[i], line_distance, nullptr, false);
+                    if (appendage_wave.empty())
+                    {
+                        appendage_wave = buildStraightWave(part_regions[i], line_distance);
+                    }
+                    appendage_waves.push_back(appendage_wave);
+                    continue;
+                }
+                for (const Polygon& poly : part_regions[i])
+                {
+                    kept_regions.push_back(poly);
+                }
+            }
+        }
+        rotated = kept_regions;
+
         const AABB region_box(rotated);
         const double ray_length = vSizeMM(region_box.max_ - region_box.min_) * 1000.0 + static_cast<double>(line_distance);
 
         std::vector<ToothChain> layer_chains = deriveChains(chains, rotated, line_distance, ray_length);
-        OpenLinesSet waves = chainsToWaves(layer_chains);
+
+#ifdef TW_EPIC_DEBUG
+        {
+            size_t derived_teeth = 0;
+            for (const ToothChain& c : layer_chains)
+            {
+                derived_teeth += c.teeth.size();
+            }
+            std::fprintf(
+                stderr,
+                "[tw-diag] layer %zu: kept_area %.1f mm2, appendages %zu, derived chains %zu teeth %zu\n",
+                layer_idx,
+                rotated.area() / 1e6,
+                static_cast<size_t>(appendage_waves.size()),
+                layer_chains.size(),
+                derived_teeth);
+        }
+#endif
+
+        // The untracked (static, refreshed per layer) fills: junction patches and appendages.
+        OpenLinesSet static_waves = std::move(appendage_waves);
+
+        // Junction patches are not tracked tooth-by-tooth; refresh their straight fallback fill
+        // on derived layers. Layer 0 instead gets them from the full skeleton pipeline below.
+        if (layer_idx > 0 || ! layer_chains.empty())
+        {
+            for (const SingleShape& part : rotated.splitIntoParts())
+            {
+                static_waves.push_back(buildJunctionPatchWaves(part, line_distance));
+            }
+        }
 
         // Parts not reached by any derived tooth (new islands, or the very first layer) get a
-        // fresh wave from the full skeleton pipeline.
+        // fresh wave from the full skeleton pipeline. Its tracked (limb) waves are rendered from
+        // the recorded chains below; only its untracked patch fills are returned as polylines.
         for (const SingleShape& part : rotated.splitIntoParts())
         {
             const bool covered = std::any_of(
@@ -1429,17 +2227,68 @@ TriangleWaveEpicTrackingProvider::TriangleWaveEpicTrackingProvider(const std::ve
                 continue;
             }
             std::vector<ToothChain> fresh_chains;
-            OpenLinesSet part_waves = buildSkeletonWaves(part, line_distance, &fresh_chains);
-            if (part_waves.empty())
+            OpenLinesSet part_static = buildSkeletonWaves(part, line_distance, &fresh_chains);
+            if (part_static.empty() && fresh_chains.empty())
             {
-                part_waves = buildStraightWave(part, line_distance, &fresh_chains);
+                buildStraightWave(part, line_distance, &fresh_chains);
             }
-            waves.push_back(part_waves);
+            static_waves.push_back(part_static);
             layer_chains.insert(layer_chains.end(), fresh_chains.begin(), fresh_chains.end());
         }
 
+        // A wave flank passing through outside space would print as a flying line, or - when it
+        // re-enters right next to itself - as a doubled remnant. Split such chains at the exits.
+        splitChainsAtRegionExits(layer_chains, rotated);
+
+        // Doubled fills print as a denser zigzag stripe: a chain can fold back onto itself, a
+        // splinter chain fragment can regrow on top of the chain it split off from, and a static
+        // fill can appear on top of the tracked wave when its classification flickers for one
+        // layer. Drop all three kinds of duplicates.
+        for (ToothChain& chain : layer_chains)
+        {
+            removeFoldbackTeeth(chain, line_distance);
+        }
+        removeRedundantChains(layer_chains, line_distance);
+        removeRedundantStaticWaves(chainsToWaves(layer_chains), static_waves, line_distance);
+
+        // Hard guarantee: this layer's printed wave contains no crossing flanks. Teeth removed
+        // here stay removed in the tracking state, so a tangle cannot re-appear above.
+        removeCrossingTeeth(layer_chains, static_waves);
+
+        // The crossing sweep can trim a tangled splinter down to a small crossing-free remnant
+        // which hugs the wave it tangled with; sweep for duplicates once more to catch those.
+        removeRedundantChains(layer_chains, line_distance);
+        removeRedundantStaticWaves(chainsToWaves(layer_chains), static_waves, line_distance);
+
+        OpenLinesSet waves = chainsToWaves(layer_chains);
+        waves.push_back(static_waves);
+
         layer_waves_[layer_idx] = std::move(waves);
         chains = std::move(layer_chains);
+
+#ifdef TW_EPIC_DEBUG
+        if (tw_epic_debug::svg != nullptr)
+        {
+            for (size_t chain_idx = 0; chain_idx < chains.size(); ++chain_idx)
+            {
+                const ToothChain& chain = chains[chain_idx];
+                for (const TrackedTooth& tooth : chain.teeth)
+                {
+                    std::fprintf(
+                        tw_epic_debug::svg,
+                        "<polyline class='rib' data-layer='%zu' data-chain='%zu-%zu-%d' points='%lld,%lld %lld,%lld'/>\n",
+                        layer_idx,
+                        chain_idx,
+                        chain.teeth.size(),
+                        chain.closed ? 1 : 0,
+                        static_cast<long long>(tooth.base.X),
+                        static_cast<long long>(tooth.base.Y),
+                        static_cast<long long>(tooth.apex.X),
+                        static_cast<long long>(tooth.apex.Y));
+                }
+            }
+        }
+#endif
 
 #ifdef TW_EPIC_BENCH
         const auto bench_now = std::chrono::steady_clock::now();
