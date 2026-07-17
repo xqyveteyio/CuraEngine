@@ -37,6 +37,7 @@
 #include "infill/LightningGenerator.h"
 #include "infill/SierpinskiFillProvider.h"
 #include "infill/SubDivCube.h"
+#include "infill/SurfaceTriangleWaveInfill.h"
 #include "infill/UniformDensityProvider.h"
 #include "progress/Progress.h"
 #include "progress/ProgressEstimator.h"
@@ -700,6 +701,31 @@ void FffPolygonGenerator::processDerivedWallsSkinInfill(SliceMeshStorage& mesh)
     {
         // TODO: Make all of these into new type pointers (but the cross fill things need to happen too then, otherwise it'd just look weird).
         mesh.lightning_generator = std::make_shared<LightningGenerator>(mesh);
+    }
+
+    // Pre-compute the per-layer waves for the surface-conformal triangle wave infill: each
+    // layer's wave inherits its modulus and phase from the layer below, which requires seeing
+    // all layers bottom-up before any layer can be printed.
+    if (mesh.settings.get<coord_t>("infill_line_distance") > 0 && mesh.settings.get<EFillMethod>("infill_pattern") == EFillMethod::SURFACE_TRIANGLE_WAVE)
+    {
+        std::vector<Shape> layer_infill_areas;
+        layer_infill_areas.reserve(mesh.layers.size());
+        for (const SliceLayer& layer : mesh.layers)
+        {
+            Shape layer_infill_area;
+            for (const SliceLayerPart& part : layer.parts)
+            {
+                layer_infill_area.push_back(part.getOwnInfillArea());
+            }
+            layer_infill_areas.push_back(std::move(layer_infill_area));
+        }
+        // The wave is constrained by the extra infill walls (which will be subtracted from the
+        // infill area at gcode time) and by the minimum wall line width.
+        const coord_t infill_line_width = mesh.settings.get<coord_t>("infill_line_width");
+        const coord_t wall_clearance
+            = static_cast<coord_t>(mesh.settings.get<size_t>("infill_wall_line_count")) * infill_line_width + mesh.settings.get<coord_t>("min_wall_line_width") / 2;
+        mesh.surface_wave_fill_provider
+            = std::make_shared<SurfaceWaveFillProvider>(layer_infill_areas, mesh.settings.get<coord_t>("infill_line_distance"), infill_line_width, wall_clearance);
     }
 
     // combine infill

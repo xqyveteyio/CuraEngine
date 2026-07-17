@@ -21,6 +21,7 @@
 #include "infill/SierpinskiFill.h"
 #include "infill/SierpinskiFillProvider.h"
 #include "infill/SubDivCube.h"
+#include "infill/SurfaceTriangleWaveInfill.h"
 #include "infill/UniformDensityProvider.h"
 #include "plugins/slots.h"
 #include "sliceDataStorage.h"
@@ -96,6 +97,7 @@ void Infill::generate(
         return;
     }
 
+    layer_idx_ = layer_idx;
     inner_contour_ = generateWallToolPaths(toolpaths, outer_contour_, wall_line_count_, infill_line_width_, settings, layer_idx, section_type);
     scripta::log("infill_inner_contour_0", inner_contour_, section_type, layer_idx);
 
@@ -316,6 +318,9 @@ void Infill::_generate(
         assert(lightning_trees); // "Cannot generate Lightning infill without a generator!\n"
         generateLightningInfill(lightning_trees, result_lines);
         break;
+    case EFillMethod::SURFACE_TRIANGLE_WAVE:
+        generateSurfaceTriangleWaveInfill(result_lines, result_polygons, mesh ? mesh->surface_wave_fill_provider : nullptr);
+        break;
     case EFillMethod::PLUGIN:
     {
 #ifdef ENABLE_PLUGINS // FIXME: I don't like this conditional block outside of the plugin scope.
@@ -348,7 +353,7 @@ void Infill::_generate(
 
     if (! skip_line_stitching_
         && (zig_zaggify_ || pattern_ == EFillMethod::CROSS || pattern_ == EFillMethod::CROSS_3D || pattern_ == EFillMethod::CUBICSUBDIV || pattern_ == EFillMethod::GYROID
-            || pattern_ == EFillMethod::ZIG_ZAG))
+            || pattern_ == EFillMethod::SURFACE_TRIANGLE_WAVE || pattern_ == EFillMethod::ZIG_ZAG))
     { // don't stich for non-zig-zagged line infill types
         OpenLinesSet stitched_lines;
         OpenPolylineStitcher::stitch(result_lines, stitched_lines, result_polygons, infill_line_width_);
@@ -423,6 +428,22 @@ void Infill::generateGyroidInfill(OpenLinesSet& result_lines, Shape& result_poly
 {
     OpenLinesSet line_segments;
     GyroidInfill::generateTotalGyroidInfill(line_segments, zig_zaggify_, line_distance_, inner_contour_, z_);
+    OpenPolylineStitcher::stitch(line_segments, result_lines, result_polygons, infill_line_width_);
+}
+
+void Infill::generateSurfaceTriangleWaveInfill(OpenLinesSet& result_lines, Shape& result_polygons, const std::shared_ptr<SurfaceWaveFillProvider>& provider)
+{
+    OpenLinesSet line_segments;
+    if (provider && layer_idx_ >= 0)
+    {
+        // Clip this layer's pre-computed wave (modulus and phase inherited from the layer below) to the outline.
+        provider->generate(line_segments, inner_contour_, static_cast<size_t>(layer_idx_));
+    }
+    else
+    {
+        // No cross-layer data available (e.g. support): generate from this outline only.
+        SurfaceWaveFillProvider::generateSingleLayer(line_segments, inner_contour_, line_distance_, infill_line_width_);
+    }
     OpenPolylineStitcher::stitch(line_segments, result_lines, result_polygons, infill_line_width_);
 }
 

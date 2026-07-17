@@ -268,5 +268,11 @@ TEST_F(SettingsTest, EnumStringSwitch)
     EXPECT_EQ(settings.get<EFillMethod>("infill_type"), EFillMethod::LIGHTNING);
 }
 
+TEST_F(SettingsTest, EnumSurfaceTriangleWave)
+{
+    settings.add("infill_type", "surface_triangle_wave");
+    EXPECT_EQ(settings.get<EFillMethod>("infill_type"), EFillMethod::SURFACE_TRIANGLE_WAVE);
+}
+
 } // namespace cura
 // NOLINTEND(*-magic-numbers)

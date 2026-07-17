@@ -27,6 +27,7 @@ enum class EFillMethod
     CROSS_3D,
     GYROID,
     LIGHTNING,
+    SURFACE_TRIANGLE_WAVE,
     NONE, // NOTE: Should remain second last! Before PLUGIN (Might be used in testing to enumerate the enum.)
     PLUGIN, // Place plugin after none to prevent it from being tested in the gtest suite.
 };
