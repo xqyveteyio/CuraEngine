@@ -24,18 +24,18 @@ class Shape;
  *     longitudinal reference line. All wave periods and peak positions are parameterized by the
  *     arc length along this axis, so the wave follows the tangent direction of the curved
  *     surface instead of absolute coordinates.
- *  2. Modulus scaling: the axis is split into segments of equal modulus (fixed number of wave
- *     cells per segment). When the part narrows/widens or shortens/lengthens between layers,
- *     the peak COUNT stays fixed and the period/amplitude scale proportionally, so every peak
- *     keeps matching the corresponding groove of the layer below.
- *  3. Phase lock and mapping reuse: the wave of a layer is derived from the layer below. The
- *     axis orientation, segment boundaries and every single peak of the lower layer are
- *     projected onto the current axis, so the phase is inherited continuously; no global
- *     layer-to-layer lateral offset is ever applied. Peaks of consecutive layers therefore
- *     stack up along the curved surface (normal-direction correspondence) and interlock.
- *  4. Segmented modulus for strongly curved surfaces: the axis is cut where the accumulated
- *     turning angle becomes large; each segment carries its own fixed cell count with a smooth
- *     (continuous polyline) transition at the boundaries.
+ *  2. One consistent cell geometry over all layers: the wave period is a model-global constant
+ *     (derived from the infill density, which thereby also sets the fold angle of the symmetric
+ *     triangle cells) and the uniform per-layer amplitude follows the room the cross section
+ *     offers at the current fill height, but may only change gradually from one layer to the
+ *     next, so consecutive layers' triangle cells are (nearly) congruent and keep interlocking.
+ *  3. Phase lock and mapping reuse: the wave of a layer is derived from the layer below. Every
+ *     single peak of the lower layer is projected (along the surface normal) onto the current
+ *     axis, so the phase is inherited continuously; no layer-to-layer lateral offset is ever
+ *     applied. The wave only bends along with the surface curvature; peaks of consecutive
+ *     layers stack up over the grooves of the layer below and interlock.
+ *  4. The closing lines at both ends of the wave polyline are extended along the axis up to the
+ *     inner wall, anchoring the wave on the walls.
  */
 class SurfaceWaveFillProvider
 {
@@ -44,8 +44,8 @@ public:
      * Sequentially build the waves of all layers, bottom up, each layer inheriting modulus and
      * phase from the layer below.
      * \param layer_outlines The infill areas of all layers (and all their parts).
-     * \param line_distance The nominal distance along the axis between two wave cells (the wave
-     *        period on the layer where a part first appears; afterwards it scales with the part).
+     * \param line_distance Half the wave period: the model-global fixed cell size is
+     *        2 * line_distance, tying the wave's fold angle to the infill density.
      * \param line_width The width with which the pattern lines will be extruded.
      * \param wall_clearance Extra distance to keep from the boundary of the given outlines (for
      *        the extra infill walls and the minimum wall line width), constraining the wave.

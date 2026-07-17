@@ -616,78 +616,47 @@ void sampleAxis(const ReferenceAxis& axis, const coord_t s, Point2LL& position, 
 }
 
 /*!
- * Lay out a fresh wave on an axis that has no predecessor on the layer below, using segments of
- * equal modulus ("分段模数均分"): a segment boundary is inserted wherever the accumulated
- * turning angle of the axis exceeds 45 degrees, so that on strongly curved surfaces every
- * segment covers a stretch of roughly constant direction. Within one segment a FIXED number of
- * wave cells is placed (rounded from the nominal period); the actual period is then the segment
- * length divided by that count, uniform inside the segment and continuous over the boundary.
+ * Lay out a fresh wave on an axis that has no predecessor on the layer below. The wave uses the
+ * one model-global FIXED period ("全层三角波折线统一固定周期"): apexes are placed at exactly half
+ * a period apart, anchored symmetrically around the middle of the axis, so every layer's wave
+ * has identical cell geometry (period, amplitude and thereby fold angle) and only the leftover
+ * at the two ends varies with the axis length. Only an axis too short for even one nominal
+ * period gets a single compressed period instead ("至少每层生成一个周期").
  */
 void layoutFreshApexes(ReferenceAxis& axis, const coord_t cell_period)
 {
     axis.apex_positions.clear();
     axis.apex_sides.clear();
 
-    const coord_t min_segment_length = 2 * cell_period;
-    std::vector<coord_t> cut_positions = { 0 };
-    if (axis.points.size() > 2)
+    const coord_t half_period = cell_period / 2;
+    if (axis.total_length < cell_period || half_period <= 0)
     {
-        double accumulated_turn = 0.0;
-        double previous_angle = std::atan2(static_cast<double>(axis.points[1].Y - axis.points[0].Y), static_cast<double>(axis.points[1].X - axis.points[0].X));
-        coord_t last_cut = 0;
-        for (size_t i = 1; i + 1 < axis.points.size(); i++)
-        {
-            const double angle
-                = std::atan2(static_cast<double>(axis.points[i + 1].Y - axis.points[i].Y), static_cast<double>(axis.points[i + 1].X - axis.points[i].X));
-            double turn = angle - previous_angle;
-            while (turn > std::numbers::pi)
-            {
-                turn -= 2.0 * std::numbers::pi;
-            }
-            while (turn < -std::numbers::pi)
-            {
-                turn += 2.0 * std::numbers::pi;
-            }
-            previous_angle = angle;
-            accumulated_turn += std::abs(turn);
-
-            if (accumulated_turn > std::numbers::pi / 4.0 && axis.cumulative[i] - last_cut >= min_segment_length
-                && axis.total_length - axis.cumulative[i] >= min_segment_length)
-            {
-                cut_positions.push_back(axis.cumulative[i]);
-                last_cut = axis.cumulative[i];
-                accumulated_turn = 0.0;
-            }
-        }
+        axis.apex_positions = { axis.total_length / 4, axis.total_length * 3 / 4 };
+        axis.apex_sides = { true, false };
+        return;
     }
-    cut_positions.push_back(axis.total_length);
 
+    const size_t apex_count = std::max<size_t>(2, static_cast<size_t>(axis.total_length / half_period));
+    const coord_t start = (axis.total_length - static_cast<coord_t>(apex_count - 1) * half_period) / 2;
     bool side_positive = true;
-    for (size_t segment_idx = 0; segment_idx + 1 < cut_positions.size(); segment_idx++)
+    for (size_t apex_idx = 0; apex_idx < apex_count; apex_idx++)
     {
-        const coord_t s0 = cut_positions[segment_idx];
-        const coord_t segment_length = cut_positions[segment_idx + 1] - s0;
-        const size_t cells = std::max<size_t>(1, static_cast<size_t>(std::llround(static_cast<double>(segment_length) / static_cast<double>(cell_period))));
-        for (size_t cell = 0; cell < cells; cell++)
-        {
-            // Two apexes per cell, at 1/4 and 3/4 of the cell, on alternating sides of the axis.
-            for (const double in_cell : { 0.25, 0.75 })
-            {
-                const coord_t s = s0 + std::llrint(static_cast<double>(segment_length) * (static_cast<double>(cell) + in_cell) / static_cast<double>(cells));
-                axis.apex_positions.push_back(s);
-                axis.apex_sides.push_back(side_positive);
-                side_positive = ! side_positive;
-            }
-        }
+        axis.apex_positions.push_back(start + static_cast<coord_t>(apex_idx) * half_period);
+        axis.apex_sides.push_back(side_positive);
+        side_positive = ! side_positive;
     }
 }
 
 /*!
  * The uniform wave amplitude of an axis ("统一等幅"): limited by the narrowest cross section
- * along the span covered by the wave, minus half the extrusion width, so the equal-amplitude
- * wave fits inside the boundary everywhere and its lines never overlap the walls.
+ * along the span covered by the wave minus half the extrusion width (so the wave fits inside
+ * the boundary everywhere and never overlaps the walls), and additionally capped by
+ * \p max_amplitude: the amplitude of the layer below plus a small growth allowance. The
+ * amplitude thereby follows the available room as the fill height changes ("幅值随填充高度变化")
+ * but can only change gradually from one layer to the next, keeping the fold angle of the
+ * symmetric triangle (nearly) identical on all layers ("所有层对称折角大小一致").
  */
-void computeUniformAmplitude(ReferenceAxis& axis, const coord_t line_width)
+void computeUniformAmplitude(ReferenceAxis& axis, const coord_t line_width, const coord_t max_amplitude)
 {
     if (axis.apex_positions.empty())
     {
@@ -713,7 +682,7 @@ void computeUniformAmplitude(ReferenceAxis& axis, const coord_t line_width)
         sampleAxis(axis, s, position, tangent, radius);
         min_radius = std::min(min_radius, radius);
     }
-    axis.amplitude = std::max<coord_t>(0, min_radius - line_width / 2);
+    axis.amplitude = std::min(max_amplitude, std::max<coord_t>(0, min_radius - line_width / 2));
 }
 
 //! The 2D tip of one apex, computed on the axis it belongs to; the geometric feature that the next layer's wave binds to.
@@ -769,8 +738,11 @@ void removeSelfCrossings(std::vector<Point2LL>& points)
  * Generate the triangle wave that belongs to one reference axis: one single continuous,
  * unbroken polyline from axis start to axis end that visits every apex tip in order. All
  * apexes use the same amplitude, giving a uniform, symmetric equal-amplitude triangle wave.
+ * The two ends of the polyline are prolonged along the axis direction well past the local
+ * boundary distance; the subsequent clip against the part outline trims them exactly at the
+ * wall, so the closing lines of the wave extend all the way to the inner wall ("收尾线条延展到内壁").
  */
-void generateWaveAlongAxis(const ReferenceAxis& axis, OpenLinesSet& result_lines)
+void generateWaveAlongAxis(const ReferenceAxis& axis, const coord_t line_width, OpenLinesSet& result_lines)
 {
     if (axis.points.size() < 2 || axis.apex_positions.size() < 2)
     {
@@ -778,12 +750,16 @@ void generateWaveAlongAxis(const ReferenceAxis& axis, OpenLinesSet& result_lines
     }
 
     std::vector<Point2LL> points;
+    const Point2LL front_out = axisOutwardDirection(axis.points, false);
+    points.push_back(axis.points.front() + normal(front_out, 2 * axis.radii.front() + 2 * line_width));
     points.push_back(axis.points.front());
     for (size_t apex_idx = 0; apex_idx < axis.apex_positions.size(); apex_idx++)
     {
         points.push_back(apexTip(axis, apex_idx));
     }
     points.push_back(axis.points.back());
+    const Point2LL back_out = axisOutwardDirection(axis.points, true);
+    points.push_back(axis.points.back() + normal(back_out, 2 * axis.radii.back() + 2 * line_width));
     removeSelfCrossings(points);
 
     OpenPolyline wave;
@@ -807,6 +783,7 @@ struct PartRecord
     SingleShape part;
     std::vector<ApexFeature> apexes;
     Point2LL probe; //!< A point well inside the part (midpoint of its longest axis), for part-to-part matching.
+    coord_t amplitude{ 0 }; //!< The wave amplitude used on this layer; the layer above may only deviate from it gradually, keeping the fold angle consistent.
 };
 
 Point2LL axisMidpoint(const ReferenceAxis& axis)
@@ -976,8 +953,8 @@ void inheritApexesFromBelow(std::vector<ReferenceAxis>& axes, const std::vector<
 /*!
  * Build the waves of one layer. For a part that also exists on the layer below, the wave is
  * derived from the apexes of the layer below by normal projection ("分层路径映射复用"), so no
- * additional lateral phase offset is ever introduced ("锁定填充相位"). Newly appearing parts
- * and branches get a freshly laid out wave with segmented, fixed modulus.
+ * additional lateral phase offset is ever introduced ("锁定填充相位, 层间波形不可错位偏移").
+ * Newly appearing parts get a freshly laid out wave with the model-global fixed period.
  */
 void buildLayerWaves(
     const Shape& outline,
@@ -1070,7 +1047,13 @@ void buildLayerWaves(
         {
             layoutFreshApexes(axes.front(), cell_period);
         }
-        computeUniformAmplitude(axes.front(), line_width);
+        // The amplitude is inherited from the layer below with only a small growth allowance per
+        // layer: it tracks the available room of the section as the fill height changes, but the
+        // wave cell geometry (period, amplitude, fold angle) stays (nearly) identical between
+        // consecutive layers, so the stacked waves keep interlocking.
+        const coord_t max_amplitude
+            = (below != nullptr && below->amplitude > 0) ? below->amplitude + std::max<coord_t>(line_width / 4, below->amplitude / 16) : std::numeric_limits<coord_t>::max();
+        computeUniformAmplitude(axes.front(), line_width, max_amplitude);
 
 #ifdef SW_DEBUG
         std::fprintf(
@@ -1086,7 +1069,7 @@ void buildLayerWaves(
         PartRecord record;
         {
             const ReferenceAxis& axis = axes.front();
-            generateWaveAlongAxis(axis, part_lines);
+            generateWaveAlongAxis(axis, line_width, part_lines);
             for (size_t apex_idx = 0; apex_idx < axis.apex_positions.size(); apex_idx++)
             {
                 Point2LL base;
@@ -1095,6 +1078,7 @@ void buildLayerWaves(
                 sampleAxis(axis, axis.apex_positions[apex_idx], base, tangent, radius);
                 record.apexes.push_back({ base, apexTip(axis, apex_idx) });
             }
+            record.amplitude = axis.amplitude;
         }
 
         // Straight wave flanks may cut across the boundary at sharp axis turns; clip to be safe.
@@ -1112,10 +1096,10 @@ void buildLayerWaves(
         ReferenceAxis& axis = best_skipped_axis;
         axis.apex_positions = { axis.total_length / 4, axis.total_length * 3 / 4 };
         axis.apex_sides = { true, false };
-        computeUniformAmplitude(axis, line_width);
+        computeUniformAmplitude(axis, line_width, std::numeric_limits<coord_t>::max());
 
         OpenLinesSet part_lines;
-        generateWaveAlongAxis(axis, part_lines);
+        generateWaveAlongAxis(axis, line_width, part_lines);
         lines_out.push_back(best_skipped_part.intersection(part_lines, true, line_width));
 
         PartRecord record;
@@ -1127,6 +1111,7 @@ void buildLayerWaves(
             sampleAxis(axis, axis.apex_positions[apex_idx], base, tangent, radius);
             record.apexes.push_back({ base, apexTip(axis, apex_idx) });
         }
+        record.amplitude = axis.amplitude;
         record.probe = axisMidpoint(axis);
         record.part = std::move(best_skipped_part);
         records_out.push_back(std::move(record));
