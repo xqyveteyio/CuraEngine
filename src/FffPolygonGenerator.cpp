@@ -719,11 +719,12 @@ void FffPolygonGenerator::processDerivedWallsSkinInfill(SliceMeshStorage& mesh)
             }
             layer_infill_areas.push_back(std::move(layer_infill_area));
         }
-        // The wave is constrained by the extra infill walls (which will be subtracted from the
-        // infill area at gcode time) and by the minimum wall line width.
+        // The region division is the same as for the native grid-type patterns: the per-part
+        // infill areas, minus the extra infill walls (which are generated from those areas and
+        // subtracted at gcode time). The wave peaks contact the boundary of exactly the region
+        // the infill lines will actually fill.
         const coord_t infill_line_width = mesh.settings.get<coord_t>("infill_line_width");
-        const coord_t wall_clearance
-            = static_cast<coord_t>(mesh.settings.get<size_t>("infill_wall_line_count")) * infill_line_width + mesh.settings.get<coord_t>("min_wall_line_width") / 2;
+        const coord_t wall_clearance = static_cast<coord_t>(mesh.settings.get<size_t>("infill_wall_line_count")) * infill_line_width;
         mesh.surface_wave_fill_provider
             = std::make_shared<SurfaceWaveFillProvider>(layer_infill_areas, mesh.settings.get<coord_t>("infill_line_distance"), infill_line_width, wall_clearance);
     }

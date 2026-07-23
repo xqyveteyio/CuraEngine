@@ -20,22 +20,26 @@ class Shape;
  * varying cross section. A triangle wave is generated relative to the geometry of the part
  * instead of on a fixed XY grid:
  *
- *  1. Reference axis: per part, the medial axis (centerline) is computed and used as the
- *     longitudinal reference line. All wave periods and peak positions are parameterized by the
+ *  1. Region division and reference axis: the fill regions are the same per-part infill areas
+ *     the native grid-type patterns fill. Per region, the medial axis (centerline) is computed
+ *     and used as the longitudinal reference line; all peak positions are parameterized by the
  *     arc length along this axis, so the wave follows the tangent direction of the curved
  *     surface instead of absolute coordinates.
- *  2. One consistent cell geometry over all layers: the wave period is a model-global constant
- *     (derived from the infill density, which thereby also sets the fold angle of the symmetric
- *     triangle cells) and the uniform per-layer amplitude follows the room the cross section
- *     offers at the current fill height, but may only change gradually from one layer to the
- *     next, so consecutive layers' triangle cells are (nearly) congruent and keep interlocking.
+ *  2. Wall contact with one apex angle: every wave peak/valley reaches from the axis
+ *     perpendicularly (the perpendicular bisector at each apex is perpendicular to the medial
+ *     axis) to the wall it faces and contacts it, with peaks and valleys alternating between
+ *     the two sides. The apex spacing scales with the local cross-section width, so the apex
+ *     ANGLE is the same everywhere ("等顶角"); the average spacing -- and thereby the angle --
+ *     is set by the infill density. Per independent region, one single continuous open
+ *     polyline is generated (no crossing grid, no self-intersection, no travel moves).
  *  3. Phase lock and mapping reuse: the wave of a layer is derived from the layer below. Every
  *     single peak of the lower layer is projected (along the surface normal) onto the current
- *     axis, so the phase is inherited continuously; no layer-to-layer lateral offset is ever
- *     applied. The wave only bends along with the surface curvature; peaks of consecutive
- *     layers stack up over the grooves of the layer below and interlock.
- *  4. The closing lines at both ends of the wave polyline are extended along the axis up to the
- *     inner wall, anchoring the wave on the walls.
+ *     axis, so direction, fill angle and phase are inherited unchanged; no layer-to-layer
+ *     lateral offset is ever applied. The wave only shifts along with the surface itself, so
+ *     the lines of consecutive layers overlap and interlock even when the cross sections of a
+ *     doubly-curved part drift sideways between layers.
+ *  4. The first and last line of each path keep their own direction and are prolonged until
+ *     they contact the wall, so both path ends are anchored on the innermost wall as well.
  */
 class SurfaceWaveFillProvider
 {
@@ -48,7 +52,8 @@ public:
      *        2 * line_distance, tying the wave's fold angle to the infill density.
      * \param line_width The width with which the pattern lines will be extruded.
      * \param wall_clearance Extra distance to keep from the boundary of the given outlines (for
-     *        the extra infill walls and the minimum wall line width), constraining the wave.
+     *        the extra infill walls that are subtracted from the areas at gcode time), so the
+     *        wave is generated on the same region the pattern will actually fill.
      */
     SurfaceWaveFillProvider(const std::vector<Shape>& layer_outlines, coord_t line_distance, coord_t line_width, coord_t wall_clearance);
 
