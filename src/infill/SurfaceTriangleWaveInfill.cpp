@@ -1523,6 +1523,7 @@ bool transferApexesByParameter(ReferenceAxis& axis, const PartRecord& below)
         axis.apex_positions.push_back(tauToArc(axis, profile, fraction * profile.back()));
         axis.apex_sides.push_back(side);
     }
+
     return true;
 }
 
@@ -1869,7 +1870,16 @@ void SurfaceWaveFillProvider::generate(OpenLinesSet& result_lines, const Shape& 
     {
         return;
     }
-    result_lines.push_back(in_outline.intersection(layer_waves_[layer_idx], true, line_width_));
+    OpenLinesSet clipped = in_outline.intersection(layer_waves_[layer_idx], true, line_width_);
+    for (OpenPolyline& polyline : clipped)
+    {
+        // Degenerate crumbs (clip artifacts at points that graze the given outline) would only
+        // cause pointless travel moves; the wave itself is built to stay inside the region.
+        if (polyline.length() >= line_width_)
+        {
+            result_lines.push_back(std::move(polyline));
+        }
+    }
 }
 
 void SurfaceWaveFillProvider::generateSingleLayer(OpenLinesSet& result_lines, const Shape& in_outline, const coord_t line_distance, const coord_t line_width)

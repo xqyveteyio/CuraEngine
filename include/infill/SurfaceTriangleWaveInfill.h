@@ -40,6 +40,13 @@ class Shape;
  *     doubly-curved part drift sideways between layers.
  *  4. The first and last line of each path keep their own direction and are prolonged until
  *     they contact the wall, so both path ends are anchored on the innermost wall as well.
+ *  5. The centerline is only kept inside the effective MAIN fill region: skeleton branches
+ *     into small appendage areas attached to the boundary (rib pockets and the like) are
+ *     removed, truncating the reference axis at the junction with the main region.
+ *  6. A region contains nothing but the continuous triangle wave or its tip-truncated form:
+ *     degenerate spikes (flanks folding onto each other) are cut off, and any stretch that
+ *     would leave the region is replaced by the walk along the region boundary, connecting
+ *     break points along the wall without crossing holes or non-printable areas.
  */
 class SurfaceWaveFillProvider
 {
