@@ -703,8 +703,8 @@ void distributeApexesByTau(ReferenceAxis& axis, const std::vector<double>& tau, 
             segment_idx++;
         }
         const double along = (target - tau[segment_idx]) / std::max(tau[segment_idx + 1] - tau[segment_idx], 1e-12);
-        const coord_t s = axis.cumulative[segment_idx]
-                        + std::llrint(std::clamp(along, 0.0, 1.0) * static_cast<double>(axis.cumulative[segment_idx + 1] - axis.cumulative[segment_idx]));
+        const coord_t s
+            = axis.cumulative[segment_idx] + std::llrint(std::clamp(along, 0.0, 1.0) * static_cast<double>(axis.cumulative[segment_idx + 1] - axis.cumulative[segment_idx]));
         axis.apex_positions.push_back(s);
         axis.apex_sides.push_back(side_positive);
         side_positive = ! side_positive;
@@ -1103,7 +1103,8 @@ void generateWaveAlongAxis(const ReferenceAxis& axis, const SingleShape& part, c
         // PLATEAU along the wall instead of an ideal sharp point, so a small lateral phase
         // shift between consecutive layers still leaves the plateau areas overlapping.
         const coord_t prev_gap = (apex_idx == 0) ? axis.apex_positions[apex_idx] : axis.apex_positions[apex_idx] - axis.apex_positions[apex_idx - 1];
-        const coord_t next_gap = (apex_idx + 1 == tips.size()) ? axis.total_length - axis.apex_positions[apex_idx] : axis.apex_positions[apex_idx + 1] - axis.apex_positions[apex_idx];
+        const coord_t next_gap
+            = (apex_idx + 1 == tips.size()) ? axis.total_length - axis.apex_positions[apex_idx] : axis.apex_positions[apex_idx + 1] - axis.apex_positions[apex_idx];
         const coord_t plateau_half = line_width / 2;
         if (std::min(prev_gap, next_gap) > 4 * line_width && plateau_half > 0)
         {
@@ -1377,7 +1378,12 @@ void projectOntoAxis(const ReferenceAxis& axis, const Point2LL& p, coord_t& arc_
  * axis extends beyond the inherited apexes (newly appeared region), the wave is continued with
  * the nominal period.
  */
-void inheritApexesFromBelow(std::vector<ReferenceAxis>& axes, const std::vector<ApexFeature>& below_apexes, const coord_t cell_period, const coord_t line_width, const SingleShape& part)
+void inheritApexesFromBelow(
+    std::vector<ReferenceAxis>& axes,
+    const std::vector<ApexFeature>& below_apexes,
+    const coord_t cell_period,
+    const coord_t line_width,
+    const SingleShape& part)
 {
     struct ProjectedApex
     {
@@ -1603,7 +1609,8 @@ void applyDistributedPhaseCorrection(ReferenceAxis& axis, const double delta_tau
     // Equal-angle relaxation: pull every apex a SMALL share towards the uniform layout, with the
     // per-layer displacement capped so consecutive layers always keep overlapping.
     constexpr double correction_gain = 0.15; // 15% of the residual error per layer.
-    const double max_shift_tau = arcToTau(axis, profile, std::min<coord_t>(axis.total_length, 2 * line_width)); // Displacement cap, expressed in tau near the axis start (approximation).
+    const double max_shift_tau
+        = arcToTau(axis, profile, std::min<coord_t>(axis.total_length, 2 * line_width)); // Displacement cap, expressed in tau near the axis start (approximation).
     const double uniform_spacing = tau_total / static_cast<double>(taus.size());
     std::vector<double> corrected(taus.size());
     for (size_t i = 0; i < taus.size(); i++)
