@@ -410,16 +410,21 @@ private:
     /*!
      * Generate the medial-axis alternating zigzag infill.
      *
-     * Within each part of the infill area a continuous zigzag polyline is generated between nodes that lie on
-     * the walls on either side of the (conceptual) medial axis of the part. The nodes are placed where fixed
-     * 'node cutting planes' - lines perpendicular to the infill angle, spaced \ref line_distance_ apart and
-     * anchored to the infill origin - cross the outer wall of the part. Planes with an even absolute index
-     * place their node on the upper wall, planes with an odd index on the lower wall, so nodes on the same
-     * wall repeat with a period of twice \ref line_distance_ and the two walls are half a period out of
-     * phase. Because the planes and their parity are anchored to the (per-mesh constant) infill origin
-     * instead of to the current layer outline, every layer of the model uses the same cutting planes and the
-     * same phase; the nodes merely get relocated onto the actual wall of each layer. Segments crossing holes
-     * or concavities are clipped at the boundary and continue where they re-enter the solid region.
+     * Within each part of the infill area a continuous zigzag polyline is generated between nodes that lie
+     * on the walls on either side of the medial axis of the part. Both walls receive the same number of node
+     * periods N, which follows from the medial axis length and the reference node period (twice
+     * \ref line_distance_). On each wall the nodes are distributed uniformly along that wall's own arc
+     * length - a longer (e.g. outer) wall therefore gets a larger actual node spacing than a shorter (e.g.
+     * inner) wall - and the two walls are half a period out of phase in the normalized arc-length parameter.
+     *
+     * Ring-like parts (with a dominant hole) use the outer wall and the hole wall as the two walls and close
+     * the zigzag into a loop. Elongated parts without holes (slabs, L-shapes, C-shapes...) compute the medial
+     * axis from the voronoi skeleton of the boundary and split the boundary at the two axis ends into the two
+     * side walls. Parts without a usable medial axis (round-ish blobs) fall back to fixed, equally spaced node
+     * cutting planes perpendicular to the infill angle, anchored to the infill origin.
+     *
+     * Segments crossing holes or concavities are clipped at the boundary and continue where they re-enter the
+     * solid region; no lines are generated inside holes.
      *
      * \param[out] result (output) The resulting lines
      */
