@@ -1,0 +1,82 @@
+name: build-binaries
+
+# Builds standalone CLI CuraEngine binaries for Windows (MSVC) and Linux (GCC), with Arcus and
+# the plugin system disabled — exactly like the local development build:
+#   conan build . -o "&:enable_arcus=False" -o "&:enable_plugins=False" \
+#     -c tools.build:skip_test=True --build=missing
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'include/**'
+      - 'src/**'
+      - 'conanfile.py'
+      - 'conandata.yml'
+      - 'CMakeLists.txt'
+      - '.github/workflows/build-binaries.yml'
+    branches:
+      - add_truabgke_wave_infill_cai_v3.1
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-24.04
+          - name: windows-x64
+            os: windows-2022
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Conan
+        run: pip install "conan~=2.30"
+
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2/p
+          key: conan-${{ matrix.name }}-${{ hashFiles('conanfile.py', 'conandata.yml') }}
+          restore-keys: |
+            conan-${{ matrix.name }}-
+
+      - name: Configure Conan (UltiMaker public remotes + default profile)
+        run: |
+          conan config install https://github.com/ultimaker/conan-config.git
+          conan profile detect --force
+        shell: bash
+
+      - name: Build CuraEngine
+        run: >
+          conan build .
+          -o "&:enable_arcus=False"
+          -o "&:enable_plugins=False"
+          -s compiler.cppstd=20
+          -c tools.build:skip_test=True
+          --build=missing
+        shell: bash
+
+      - name: Collect binaries
+        run: |
+          mkdir -p dist
+          find build -maxdepth 3 \( -name 'CuraEngine' -o -name 'CuraEngine.exe' \) -type f -exec cp -v {} dist/ \;
+          ls -la dist
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CuraEngine-${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
