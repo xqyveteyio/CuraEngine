@@ -27,6 +27,7 @@ enum class EFillMethod
     CROSS_3D,
     GYROID,
     LIGHTNING,
+    MEDIAL_ZIGZAG, // Continuous zigzag between nodes on the walls on either side of the medial axis, with model-wide unified node cutting planes.
     NONE, // NOTE: Should remain second last! Before PLUGIN (Might be used in testing to enumerate the enum.)
     PLUGIN, // Place plugin after none to prevent it from being tested in the gtest suite.
 };

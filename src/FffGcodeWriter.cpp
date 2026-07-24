@@ -463,6 +463,11 @@ void FffGcodeWriter::setInfillAndSkinAngles(SliceMeshStorage& mesh)
             {
                 mesh.infill_angles.push_back(22); // put most infill lines in between 45 and 0 degrees
             }
+            else if (infill_pattern == EFillMethod::MEDIAL_ZIGZAG)
+            {
+                // medial zigzag requires the same node cutting planes on every layer, so use a single fixed angle
+                mesh.infill_angles.push_back(0);
+            }
             else
             {
                 mesh.infill_angles.push_back(45); // generally all infill patterns use 45 degrees
@@ -2030,7 +2035,7 @@ bool FffGcodeWriter::processMultiLayerInfill(
                 gcode_layer.addLinesByOptimizer(
                     infill_lines,
                     mesh_config.infill_config[combine_idx],
-                    zig_zaggify_infill ? SpaceFillType::PolyLines : SpaceFillType::Lines,
+                    (zig_zaggify_infill || infill_pattern == EFillMethod::MEDIAL_ZIGZAG) ? SpaceFillType::PolyLines : SpaceFillType::Lines,
                     enable_travel_optimization,
                     /*wipe_dist = */ 0,
                     /* flow = */ 1.0,
@@ -2793,7 +2798,7 @@ bool FffGcodeWriter::processSingleLayerInfill(
             gcode_layer.addLinesByOptimizer(
                 infill_lines,
                 mesh_config.infill_config[0],
-                (pattern == EFillMethod::ZIG_ZAG) ? SpaceFillType::PolyLines : SpaceFillType::Lines,
+                (pattern == EFillMethod::ZIG_ZAG || pattern == EFillMethod::MEDIAL_ZIGZAG) ? SpaceFillType::PolyLines : SpaceFillType::Lines,
                 enable_travel_optimization,
                 /* wipe_dist = */ 0,
                 /*float_ratio = */ 1.0,
@@ -3789,7 +3794,7 @@ void FffGcodeWriter::processSkinPrintFeature(
             }
             else
             {
-                const SpaceFillType space_fill_type = (pattern == EFillMethod::ZIG_ZAG) ? SpaceFillType::PolyLines : SpaceFillType::Lines;
+                const SpaceFillType space_fill_type = (pattern == EFillMethod::ZIG_ZAG || pattern == EFillMethod::MEDIAL_ZIGZAG) ? SpaceFillType::PolyLines : SpaceFillType::Lines;
                 constexpr coord_t wipe_dist = 0;
                 gcode_layer.addLinesMonotonic(area, skin_lines, config, space_fill_type, monotonic_direction, max_adjacent_distance, exclude_distance, wipe_dist, flow, fan_speed);
             }
@@ -3822,7 +3827,7 @@ void FffGcodeWriter::processSkinPrintFeature(
             }
             else
             {
-                SpaceFillType space_fill_type = (actual_pattern == EFillMethod::ZIG_ZAG) ? SpaceFillType::PolyLines : SpaceFillType::Lines;
+                SpaceFillType space_fill_type = (actual_pattern == EFillMethod::ZIG_ZAG || actual_pattern == EFillMethod::MEDIAL_ZIGZAG) ? SpaceFillType::PolyLines : SpaceFillType::Lines;
                 constexpr coord_t wipe_dist = 0;
                 gcode_layer.addLinesByOptimizer(skin_lines, config, space_fill_type, enable_travel_optimization, wipe_dist, flow, near_start_location, fan_speed);
             }
@@ -4189,7 +4194,7 @@ bool FffGcodeWriter::processSupportInfill(const SliceDataStorage& storage, Layer
                 gcode_layer.addLinesByOptimizer(
                     support_lines,
                     configs[combine_idx],
-                    (support_pattern == EFillMethod::ZIG_ZAG) ? SpaceFillType::PolyLines : SpaceFillType::Lines,
+                    (support_pattern == EFillMethod::ZIG_ZAG || support_pattern == EFillMethod::MEDIAL_ZIGZAG) ? SpaceFillType::PolyLines : SpaceFillType::Lines,
                     enable_travel_optimization,
                     wipe_dist,
                     flow_ratio,
@@ -4375,7 +4380,7 @@ bool FffGcodeWriter::addSupportRoofsToGCode(const SliceDataStorage& storage, con
             storage.getModelBoundingBox().flatten().getMiddle());
         wall_orderer.addToLayer();
     }
-    gcode_layer.addLinesByOptimizer(roof_lines, current_roof_config, (pattern == EFillMethod::ZIG_ZAG) ? SpaceFillType::PolyLines : SpaceFillType::Lines);
+    gcode_layer.addLinesByOptimizer(roof_lines, current_roof_config, (pattern == EFillMethod::ZIG_ZAG || pattern == EFillMethod::MEDIAL_ZIGZAG) ? SpaceFillType::PolyLines : SpaceFillType::Lines);
     return true;
 }
 
@@ -4494,7 +4499,7 @@ bool FffGcodeWriter::addSupportBottomsToGCode(const SliceDataStorage& storage, L
     gcode_layer.addLinesByOptimizer(
         bottom_lines,
         gcode_layer.configs_storage_.support_bottom_config,
-        (pattern == EFillMethod::ZIG_ZAG) ? SpaceFillType::PolyLines : SpaceFillType::Lines);
+        (pattern == EFillMethod::ZIG_ZAG || pattern == EFillMethod::MEDIAL_ZIGZAG) ? SpaceFillType::PolyLines : SpaceFillType::Lines);
     return true;
 }
 

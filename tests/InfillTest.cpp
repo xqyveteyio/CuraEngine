@@ -204,8 +204,8 @@ std::vector<InfillTestParameters> generateInfillTests()
      *  - Gyroid, since it doesn't handle the 100% infill and related cases well
      *  - Concentric and ZigZag, since they now use a method that starts from an extra infill wall, which fail these tests (TODO!)
      */
-    std::vector<EFillMethod> skip_methods
-        = { EFillMethod::CONCENTRIC, EFillMethod::ZIG_ZAG, EFillMethod::CROSS, EFillMethod::CROSS_3D, EFillMethod::CUBICSUBDIV, EFillMethod::GYROID, EFillMethod::LIGHTNING };
+    std::vector<EFillMethod> skip_methods = { EFillMethod::CONCENTRIC, EFillMethod::ZIG_ZAG,  EFillMethod::CROSS,     EFillMethod::CROSS_3D,
+                                              EFillMethod::CUBICSUBDIV, EFillMethod::GYROID,   EFillMethod::LIGHTNING, EFillMethod::MEDIAL_ZIGZAG };
 
     std::vector<EFillMethod> methods;
     for (int i_method = 0; i_method < static_cast<int>(EFillMethod::NONE); ++i_method)

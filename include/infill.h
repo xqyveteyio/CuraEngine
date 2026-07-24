@@ -408,6 +408,24 @@ private:
     void generateLightningInfill(const std::shared_ptr<LightningLayer>& lightning_layer, OpenLinesSet& result_lines);
 
     /*!
+     * Generate the medial-axis alternating zigzag infill.
+     *
+     * Within each part of the infill area a continuous zigzag polyline is generated between nodes that lie on
+     * the walls on either side of the (conceptual) medial axis of the part. The nodes are placed where fixed
+     * 'node cutting planes' - lines perpendicular to the infill angle, spaced \ref line_distance_ apart and
+     * anchored to the infill origin - cross the outer wall of the part. Planes with an even absolute index
+     * place their node on the upper wall, planes with an odd index on the lower wall, so nodes on the same
+     * wall repeat with a period of twice \ref line_distance_ and the two walls are half a period out of
+     * phase. Because the planes and their parity are anchored to the (per-mesh constant) infill origin
+     * instead of to the current layer outline, every layer of the model uses the same cutting planes and the
+     * same phase; the nodes merely get relocated onto the actual wall of each layer. Segments crossing holes
+     * or concavities are clipped at the boundary and continue where they re-enter the solid region.
+     *
+     * \param[out] result (output) The resulting lines
+     */
+    void generateMedialZigzagInfill(OpenLinesSet& result);
+
+    /*!
      * Generate sparse concentric infill
      *
      * \param toolpaths (output) The resulting toolpaths. Binned by inset_idx.

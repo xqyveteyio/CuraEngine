@@ -5,6 +5,7 @@
 
 #include <algorithm> //For std::sort.
 #include <functional>
+#include <limits>
 #include <numbers>
 #include <unordered_set>
 
@@ -14,6 +15,7 @@
 #include "WallToolPaths.h"
 #include "geometry/OpenPolyline.h"
 #include "geometry/PointMatrix.h"
+#include "geometry/SingleShape.h"
 #include "infill/GyroidInfill.h"
 #include "infill/ImageBasedDensityProvider.h"
 #include "infill/LightningGenerator.h"
@@ -159,6 +161,7 @@ void Infill::generate(
 
     // apply an extra offset in case the pattern prints along the sides of the area.
     if (pattern_ == EFillMethod::ZIG_ZAG // Zig-zag prints the zags along the walls.
+        || pattern_ == EFillMethod::MEDIAL_ZIGZAG // The nodes of the medial zigzag lie on the walls.
         || (zig_zaggify_
             && (pattern_ == EFillMethod::LINES // Zig-zaggified infill patterns print their zags along the walls.
                 || pattern_ == EFillMethod::TRIANGLES || pattern_ == EFillMethod::GRID || pattern_ == EFillMethod::CUBIC || pattern_ == EFillMethod::TETRAHEDRAL
@@ -312,6 +315,9 @@ void Infill::_generate(
     case EFillMethod::GYROID:
         generateGyroidInfill(result_lines, result_polygons);
         break;
+    case EFillMethod::MEDIAL_ZIGZAG:
+        generateMedialZigzagInfill(result_lines);
+        break;
     case EFillMethod::LIGHTNING:
         assert(lightning_trees); // "Cannot generate Lightning infill without a generator!\n"
         generateLightningInfill(lightning_trees, result_lines);
@@ -348,7 +354,7 @@ void Infill::_generate(
 
     if (! skip_line_stitching_
         && (zig_zaggify_ || pattern_ == EFillMethod::CROSS || pattern_ == EFillMethod::CROSS_3D || pattern_ == EFillMethod::CUBICSUBDIV || pattern_ == EFillMethod::GYROID
-            || pattern_ == EFillMethod::ZIG_ZAG))
+            || pattern_ == EFillMethod::ZIG_ZAG || pattern_ == EFillMethod::MEDIAL_ZIGZAG))
     { // don't stich for non-zig-zagged line infill types
         OpenLinesSet stitched_lines;
         OpenPolylineStitcher::stitch(result_lines, stitched_lines, result_polygons, infill_line_width_);
@@ -434,6 +440,90 @@ void Infill::generateLightningInfill(const std::shared_ptr<LightningLayer>& tree
         return;
     }
     result_lines.push_back(trees->convertToLines(inner_contour_, infill_line_width_));
+}
+
+void Infill::generateMedialZigzagInfill(OpenLinesSet& result)
+{
+    // Distance between two consecutive node cutting planes. Nodes on the same wall are spaced one full node
+    // period (2 * line_distance_) apart; consecutive planes alternate between the upper and the lower wall,
+    // which puts the two walls half a period out of phase.
+    const coord_t plane_distance = line_distance_;
+
+    // Anchor the cutting planes to the infill origin (constant for the whole mesh) instead of to the current
+    // layer outline, so that every layer (and every part) shares the same planes and the same phase.
+    coord_t shift = getShiftOffsetFromInfillOriginAndRotation(fill_angle_) + shift_;
+    shift = ((shift % plane_distance) + plane_distance) % plane_distance;
+
+    const PointMatrix rotation_matrix(fill_angle_);
+
+    OpenLinesSet zigzag_lines;
+    for (const SingleShape& part : inner_contour_.splitIntoParts())
+    {
+        // Nodes are placed on the outer wall only; holes are handled afterwards by clipping the polyline.
+        Polygon outline = part.outerPolygon();
+        outline.applyMatrix(rotation_matrix);
+        if (outline.size() < 3)
+        {
+            continue;
+        }
+
+        coord_t x_min = std::numeric_limits<coord_t>::max();
+        coord_t x_max = std::numeric_limits<coord_t>::lowest();
+        for (const Point2LL& point : outline)
+        {
+            x_min = std::min(x_min, point.X);
+            x_max = std::max(x_max, point.X);
+        }
+        const int first_plane_idx = computeScanSegmentIdx(x_min - shift, plane_distance) + 1;
+        const int last_plane_idx = computeScanSegmentIdx(x_max - shift, plane_distance);
+
+        OpenPolyline zigzag;
+        const auto flush_zigzag = [&zigzag, &zigzag_lines]()
+        {
+            if (zigzag.size() >= 2)
+            {
+                zigzag_lines.push_back(std::move(zigzag));
+            }
+            zigzag.clear();
+        };
+
+        for (int plane_idx = first_plane_idx; plane_idx <= last_plane_idx; ++plane_idx)
+        {
+            const coord_t x = plane_idx * plane_distance + shift;
+
+            // Find where this cutting plane crosses the outer wall.
+            coord_t y_min = std::numeric_limits<coord_t>::max();
+            coord_t y_max = std::numeric_limits<coord_t>::lowest();
+            bool crossed = false;
+            for (size_t point_idx = 0; point_idx < outline.size(); point_idx++)
+            {
+                const Point2LL& p0 = outline[point_idx];
+                const Point2LL& p1 = outline[(point_idx + 1) % outline.size()];
+                if ((p0.X <= x && p1.X > x) || (p1.X <= x && p0.X > x))
+                {
+                    const coord_t y = p0.Y + (p1.Y - p0.Y) * (x - p0.X) / (p1.X - p0.X);
+                    y_min = std::min(y_min, y);
+                    y_max = std::max(y_max, y);
+                    crossed = true;
+                }
+            }
+            if (! crossed)
+            {
+                flush_zigzag();
+                continue;
+            }
+
+            // Even planes place their node on the upper wall, odd planes on the lower wall. The parity is
+            // based on the absolute plane index, so it is the same on every layer and in every part.
+            const bool upper_wall = (plane_idx % 2) == 0;
+            zigzag.push_back(rotation_matrix.unapply(Point2LL(x, upper_wall ? y_max : y_min)));
+        }
+        flush_zigzag();
+    }
+
+    // Clip against the actual infill area (including its holes): segments crossing a hole or leaving the part
+    // through a concavity are cut at the boundary and continue from where they re-enter the solid region.
+    result.push_back(inner_contour_.intersection(zigzag_lines));
 }
 
 void Infill::generateConcentricInfill(std::vector<VariableWidthLines>& toolpaths, const Settings& settings)
