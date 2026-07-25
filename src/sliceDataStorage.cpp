@@ -102,6 +102,7 @@ SliceMeshStorage::SliceMeshStorage(Mesh* mesh, const size_t slice_layer_count)
     , base_subdiv_cube(nullptr)
     , cross_fill_provider(nullptr)
     , lightning_generator(nullptr)
+    , medial_zigzag_generator(nullptr)
 {
     layers.resize(slice_layer_count);
 }

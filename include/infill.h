@@ -376,6 +376,7 @@ private:
         Shape& result_polygons,
         OpenLinesSet& result_lines,
         const Settings& settings,
+        int layer_idx,
         const std::shared_ptr<SierpinskiFillProvider>& cross_fill_pattern = nullptr,
         const std::shared_ptr<LightningLayer>& lightning_layer = nullptr,
         const SliceMeshStorage* mesh = nullptr);
@@ -419,16 +420,23 @@ private:
      *
      * Ring-like parts (with a dominant hole) use the outer wall and the hole wall as the two walls and close
      * the zigzag into a loop. Elongated parts without holes (slabs, L-shapes, C-shapes...) compute the medial
-     * axis from the voronoi skeleton of the boundary and split the boundary at the two axis ends into the two
-     * side walls. Parts without a usable medial axis (round-ish blobs) fall back to fixed, equally spaced node
-     * cutting planes perpendicular to the infill angle, anchored to the infill origin.
+     * axis from the voronoi skeleton of the boundary and sample the node positions along it. Parts without a
+     * usable medial axis (round-ish blobs) fall back to fixed, equally spaced node cutting planes
+     * perpendicular to the infill angle, anchored to the infill origin.
+     *
+     * When the mesh has a pre-computed \ref MedialZigzagGenerator (mesh infill), the lines of this layer are
+     * taken from it, which additionally anchors each layer's nodes to the nodes of the layer below. Without
+     * one (e.g. support), the lines are generated stand-alone for this layer via
+     * \ref generateMedialZigzagLines, which is deterministic but has no cross-layer anchoring.
      *
      * Segments crossing holes or concavities are clipped at the boundary and continue where they re-enter the
      * solid region; no lines are generated inside holes.
      *
      * \param[out] result (output) The resulting lines
+     * \param mesh The mesh potentially carrying the pre-computed generator, or nullptr.
+     * \param layer_idx The layer to generate (used to look up the pre-computed lines).
      */
-    void generateMedialZigzagInfill(OpenLinesSet& result);
+    void generateMedialZigzagInfill(OpenLinesSet& result, const SliceMeshStorage* mesh, int layer_idx);
 
     /*!
      * Generate sparse concentric infill

@@ -35,6 +35,7 @@
 #include "infill/DensityProvider.h"
 #include "infill/ImageBasedDensityProvider.h"
 #include "infill/LightningGenerator.h"
+#include "infill/MedialZigzag.h"
 #include "infill/SierpinskiFillProvider.h"
 #include "infill/SubDivCube.h"
 #include "infill/UniformDensityProvider.h"
@@ -700,6 +701,12 @@ void FffPolygonGenerator::processDerivedWallsSkinInfill(SliceMeshStorage& mesh)
     {
         // TODO: Make all of these into new type pointers (but the cross fill things need to happen too then, otherwise it'd just look weird).
         mesh.lightning_generator = std::make_shared<LightningGenerator>(mesh);
+    }
+
+    // Pre-compute the medial zigzag fill layer by layer, so each layer's nodes can be anchored to the nodes of the layer below.
+    if (mesh.settings.get<coord_t>("infill_line_distance") > 0 && mesh.settings.get<EFillMethod>("infill_pattern") == EFillMethod::MEDIAL_ZIGZAG)
+    {
+        mesh.medial_zigzag_generator = std::make_shared<MedialZigzagGenerator>(mesh);
     }
 
     // combine infill
