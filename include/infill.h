@@ -420,14 +420,15 @@ private:
      *
      * Ring-like parts (with a dominant hole) use the outer wall and the hole wall as the two walls and close
      * the zigzag into a loop. Elongated parts without holes (slabs, L-shapes, C-shapes...) compute the medial
-     * axis from the voronoi skeleton of the boundary and sample the node positions along it. Parts without a
-     * usable medial axis (round-ish blobs) fall back to fixed, equally spaced node cutting planes
-     * perpendicular to the infill angle, anchored to the infill origin.
+     * axis from the voronoi skeleton of the boundary and split the boundary at the axis ends into the two
+     * walls. Parts without a usable medial axis (round-ish blobs) fall back to fixed, equally spaced node
+     * cutting planes perpendicular to the infill angle, anchored to the infill origin.
      *
      * When the mesh has a pre-computed \ref MedialZigzagGenerator (mesh infill), the lines of this layer are
-     * taken from it, which additionally anchors each layer's nodes to the nodes of the layer below. Without
-     * one (e.g. support), the lines are generated stand-alone for this layer via
-     * \ref generateMedialZigzagLines, which is deterministic but has no cross-layer anchoring.
+     * taken from it: the nodes were generated once on the model's largest cross-section and mapped to every
+     * layer through fixed vertical reference planes, so all layers are vertically aligned. Without a
+     * generator (e.g. support), the lines are generated stand-alone for this layer via
+     * \ref generateMedialZigzagLines.
      *
      * Segments crossing holes or concavities are clipped at the boundary and continue where they re-enter the
      * solid region; no lines are generated inside holes.

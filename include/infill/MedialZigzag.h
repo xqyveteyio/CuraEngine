@@ -7,7 +7,6 @@
 #include <vector>
 
 #include "geometry/OpenLinesSet.h"
-#include "geometry/Point2LL.h"
 #include "utils/Coord_t.h"
 
 namespace cura
@@ -17,52 +16,37 @@ class Shape;
 class SliceMeshStorage;
 
 /*!
- * Anchor information of one part's zigzag, kept from one layer to the next so that the nodes of a
- * layer can be generated based on the medial axis of that layer *and* the node positions of the
- * layer below.
+ * Generate the medial zigzag lines for a single, stand-alone layer region (used e.g. for support,
+ * where no cross-layer structure is available). The region itself acts as its own reference
+ * cross-section: nodes are distributed along the walls on either side of the medial axis (uniformly
+ * in each wall's own arc length, both walls sharing the same period count, half a period out of
+ * phase) and connected into one alternating polyline per part. Parts without a usable medial axis
+ * fall back to fixed cutting planes perpendicular to \p plane_angle. Lines are clipped against the
+ * region, so holes are never crossed; a line leaving and re-entering the solid region continues as a
+ * new polyline.
  */
-struct MedialZigzagAnchor
-{
-    bool is_ring{ false }; //!< Whether the part was generated as a ring (walls = outer wall + hole wall).
-    size_t num_periods{ 0 }; //!< The number of node periods used, so the layer above can keep it (hysteresis).
-    Point2LL match_point; //!< A point well inside the part, used to match parts between consecutive layers.
-    Point2LL axis_front; //!< (ribbon) The ends of the medial axis, to keep the axis orientation stable across layers.
-    Point2LL axis_back;
-    Point2LL phase_point; //!< (ribbon) World position on the axis of a reference upper-side sample, to keep the node phase stable across layers.
-    double axis_period{ 0.0 }; //!< (ribbon) The exact node spacing along the axis, kept across layers so jitter of the axis length can't re-space the grid.
-};
-
-/*!
- * Generate the medial zigzag lines for one layer region (which may contain multiple parts).
- *
- * Protruding details of the walls (e.g. rows of sawteeth) are removed by a morphological opening
- * before the nodes are placed, so that nodes stay on the main wall envelope instead of wandering
- * into the protrusions. The resulting lines are clipped against \p region, so lines never cross
- * holes or leave the region.
- *
- * \param region The infill region of this layer.
- * \param line_distance The reference line distance; the node period along the medial axis is twice this.
- * \param plane_angle The angle (degrees) of the cutting-plane fallback used for parts without a usable medial axis.
- * \param plane_shift The scanline shift of the cutting-plane fallback (from the infill origin).
- * \param previous_anchors The anchors generated for the layer below; empty when unknown.
- * \param[out] new_anchors The anchors of this layer, to pass to the layer above.
- * \param[out] result The generated zigzag polylines.
- */
-void generateMedialZigzagLines(
-    const Shape& region,
-    coord_t line_distance,
-    double plane_angle,
-    coord_t plane_shift,
-    const std::vector<MedialZigzagAnchor>& previous_anchors,
-    std::vector<MedialZigzagAnchor>& new_anchors,
-    OpenLinesSet& result);
+void generateMedialZigzagLines(const Shape& region, coord_t line_distance, double plane_angle, coord_t plane_shift, OpenLinesSet& result);
 
 /*!
  * Pre-computed medial zigzag infill for a whole mesh.
  *
- * The layers are generated sequentially from bottom to top, so that each layer's nodes are anchored
- * to the nodes of the layer below: parts are matched by position, and a matched part keeps the node
- * period count (with hysteresis), the axis orientation and the node phase of the part below it.
+ * The nodes are generated once, on the layer with the largest infill cross-section:
+ *  - the medial axis of each part is computed there,
+ *  - the common period count N follows from the axis length and the reference spacing (twice the
+ *    line distance), rounded up so the spacing never exceeds the reference,
+ *  - both walls receive nodes uniformly in their own arc length (a longer outer wall thus gets a
+ *    larger actual spacing than a shorter inner wall), half a period out of phase in the normalized
+ *    arc-length parameter, connected alternately into one polyline.
+ *
+ * Every node then defines a vertical reference plane, spanned by the vertical direction and the
+ * perpendicular from the node to the medial axis. Going layer by layer outwards from the reference
+ * cross-section, each node is mapped to the intersection of its plane with the next layer's wall,
+ * considering only intersections on the node's side of the axis; the plane is then re-derived from
+ * the node's new position and the local axis direction, so it follows the walls when the
+ * cross-section drifts or twists along the height. On constant cross-sections the planes never
+ * change, so the zigzag is vertically aligned by construction. When a node's plane doesn't
+ * intersect the wall of a layer, the node is simply invalid there and skipped (never clamped to a
+ * wall end or placed outside).
  */
 class MedialZigzagGenerator
 {

@@ -452,10 +452,9 @@ void Infill::generateMedialZigzagInfill(OpenLinesSet& result, const SliceMeshSto
         return;
     }
 
-    // Stand-alone generation (e.g. for support): deterministic, but without cross-layer anchoring.
+    // Stand-alone generation (e.g. for support): this layer acts as its own reference cross-section.
     const coord_t plane_shift = getShiftOffsetFromInfillOriginAndRotation(fill_angle_) + shift_;
-    std::vector<MedialZigzagAnchor> anchors;
-    generateMedialZigzagLines(inner_contour_, line_distance_, fill_angle_, plane_shift, {}, anchors, result);
+    generateMedialZigzagLines(inner_contour_, line_distance_, fill_angle_, plane_shift, result);
 }
 
 void Infill::generateConcentricInfill(std::vector<VariableWidthLines>& toolpaths, const Settings& settings)

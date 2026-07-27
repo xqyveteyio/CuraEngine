@@ -117,17 +117,18 @@ WallChain closedWall(const Polygon& polygon)
 }
 
 /*!
- * The arc position along an open chain of the point closest to \p point. Used to project the phase
- * anchor of the layer below onto the medial axis of the current layer.
+ * The arc position along a chain of the point closest to \p point.
  */
 double nearestArcPosition(const WallChain& chain, const Point2LL& point)
 {
+    const size_t point_count = chain.points_.size();
+    const size_t segment_count = chain.closed_ ? point_count : (point_count > 0 ? point_count - 1 : 0);
     double best_distance2 = std::numeric_limits<double>::max();
     double best_s = 0.0;
-    for (size_t point_idx = 0; point_idx + 1 < chain.points_.size(); point_idx++)
+    for (size_t segment_idx = 0; segment_idx < segment_count; segment_idx++)
     {
-        const Point2LL& p0 = chain.points_[point_idx];
-        const Point2LL& p1 = chain.points_[point_idx + 1];
+        const Point2LL& p0 = chain.points_[segment_idx];
+        const Point2LL& p1 = chain.points_[(segment_idx + 1) % point_count];
         const double dx = double(p1.X - p0.X);
         const double dy = double(p1.Y - p0.Y);
         const double length2 = dx * dx + dy * dy;
@@ -138,7 +139,78 @@ double nearestArcPosition(const WallChain& chain, const Point2LL& point)
         if (distance2 < best_distance2)
         {
             best_distance2 = distance2;
-            best_s = chain.cumulative_[point_idx] + t * std::sqrt(length2);
+            best_s = chain.cumulative_[segment_idx] + t * chain.segmentLength(segment_idx);
+        }
+    }
+    return best_s;
+}
+
+/*!
+ * The portion of a closed wall from arc position \p s0 forward (in wall direction) to \p s1, as an
+ * open chain.
+ */
+WallChain subChain(const WallChain& wall, const double s0, const double s1)
+{
+    WallChain chain;
+    chain.closed_ = false;
+    double span = s1 - s0;
+    if (span < 0.0)
+    {
+        span += wall.total_;
+    }
+    chain.points_.push_back(wall.pointAt(s0));
+    // Collect the wall vertices that lie strictly between s0 and s1 (walking forward from s0), in order.
+    std::vector<std::pair<double, size_t>> in_range;
+    for (size_t point_idx = 0; point_idx < wall.points_.size(); point_idx++)
+    {
+        double delta = wall.cumulative_[point_idx] - s0;
+        if (delta < 0.0)
+        {
+            delta += wall.total_;
+        }
+        if (delta > 1.0 && delta < span - 1.0) // 1 micron margin against duplicating the end points.
+        {
+            in_range.emplace_back(delta, point_idx);
+        }
+    }
+    std::sort(in_range.begin(), in_range.end());
+    for (const auto& [delta, point_idx] : in_range)
+    {
+        chain.points_.push_back(wall.points_[point_idx]);
+    }
+    chain.points_.push_back(wall.pointAt(s0 + span));
+    chain.finish();
+    return chain;
+}
+
+/*!
+ * The arc position where the ray from \p origin in the given direction first crosses the wall, or
+ * nullopt when it never does.
+ */
+std::optional<double> rayArcPosition(const WallChain& wall, const Point2LL& origin, const double direction_x, const double direction_y)
+{
+    const auto cross = [](const double ax, const double ay, const double bx, const double by)
+    {
+        return ax * by - ay * bx;
+    };
+    double best_t = std::numeric_limits<double>::max();
+    std::optional<double> best_s;
+    const size_t point_count = wall.points_.size();
+    for (size_t point_idx = 0; point_idx < point_count; point_idx++)
+    {
+        const Point2LL& p0 = wall.points_[point_idx];
+        const Point2LL& p1 = wall.points_[(point_idx + 1) % point_count];
+        const double denominator = cross(direction_x, direction_y, p1.X - p0.X, p1.Y - p0.Y);
+        if (std::abs(denominator) < 1e-9)
+        {
+            continue;
+        }
+        const double t = cross(p0.X - origin.X, p0.Y - origin.Y, p1.X - p0.X, p1.Y - p0.Y) / denominator;
+        const double u = cross(p0.X - origin.X, p0.Y - origin.Y, direction_x, direction_y) / denominator;
+        if (t > 1e-6 && u >= 0.0 && u < 1.0 && t < best_t)
+        {
+            best_t = t;
+            best_s = wall.cumulative_[point_idx] + u * wall.segmentLength(point_idx);
         }
     }
     return best_s;
@@ -146,7 +218,7 @@ double nearestArcPosition(const WallChain& chain, const Point2LL& point)
 
 /*!
  * The arc position where the horizontal ray from \p origin towards +X crosses the wall, taking the
- * outermost (highest X) crossing. Used to give the walls of a ring a common, layer-stable parameter origin.
+ * outermost (highest X) crossing. Used to give the walls of a ring a common, deterministic parameter origin.
  */
 double rayCrossingParameter(const WallChain& wall, const Point2LL& origin)
 {
@@ -167,39 +239,6 @@ double rayCrossingParameter(const WallChain& wall, const Point2LL& origin)
         {
             best_x = x;
             best_s = wall.cumulative_[point_idx] + t * wall.segmentLength(point_idx);
-        }
-    }
-    return best_s;
-}
-
-/*!
- * The arc position of the first crossing of the ray (\p origin, direction \p direction) with the wall,
- * or nullopt when the ray doesn't hit the wall.
- */
-std::optional<double> rayBoundaryArcPosition(const WallChain& wall, const Point2LL& origin, const Point2LL& direction)
-{
-    const auto cross = [](const double ax, const double ay, const double bx, const double by)
-    {
-        return ax * by - ay * bx;
-    };
-    double best_t = std::numeric_limits<double>::max();
-    std::optional<double> best_s;
-    const size_t point_count = wall.points_.size();
-    for (size_t point_idx = 0; point_idx < point_count; point_idx++)
-    {
-        const Point2LL& p0 = wall.points_[point_idx];
-        const Point2LL& p1 = wall.points_[(point_idx + 1) % point_count];
-        const double denominator = cross(direction.X, direction.Y, p1.X - p0.X, p1.Y - p0.Y);
-        if (std::abs(denominator) < 1e-9)
-        {
-            continue;
-        }
-        const double t = cross(p0.X - origin.X, p0.Y - origin.Y, p1.X - p0.X, p1.Y - p0.Y) / denominator;
-        const double u = cross(p0.X - origin.X, p0.Y - origin.Y, direction.X, direction.Y) / denominator;
-        if (t > 1e-9 && u >= 0.0 && u < 1.0 && t < best_t)
-        {
-            best_t = t;
-            best_s = wall.cumulative_[point_idx] + u * wall.segmentLength(point_idx);
         }
     }
     return best_s;
@@ -364,242 +403,6 @@ std::optional<OpenPolyline> computeMedialAxisPath(const SingleShape& part)
     return axis;
 }
 
-/*!
- * The anchor of the layer below whose match point lies inside \p part, or nullptr when the part has
- * no counterpart in the layer below.
- */
-const MedialZigzagAnchor* findPreviousAnchor(const std::vector<MedialZigzagAnchor>& previous_anchors, const SingleShape& part)
-{
-    for (const MedialZigzagAnchor& anchor : previous_anchors)
-    {
-        if (part.inside(anchor.match_point, true))
-        {
-            return &anchor;
-        }
-    }
-    return nullptr;
-}
-
-/*!
- * The number of node periods to use: normally the rounded ratio of axis length and reference period,
- * but when the layer below used a period count that is still within tolerance, that count is kept
- * (hysteresis), so the node grid doesn't re-space on the layer where the ratio crosses a rounding boundary.
- */
-size_t choosePeriodCount(const double axis_length, const coord_t period, const MedialZigzagAnchor* previous, const bool ring)
-{
-    const double target = axis_length / period;
-    const size_t minimum = ring ? 3 : 1;
-    if (previous != nullptr && previous->is_ring == ring && previous->num_periods >= minimum && std::abs(target - double(previous->num_periods)) <= 0.75)
-    {
-        return previous->num_periods;
-    }
-    return std::max<size_t>(minimum, std::llround(target));
-}
-
-/*!
- * Generate the zigzag for a ring-like part (a part with a dominant hole, e.g. an annulus): the two
- * walls are the outer wall and the hole wall. Both walls get the same number of node periods, each
- * distributed uniformly along its own arc length, half a period out of phase, connected into a
- * closed alternating zigzag loop.
- */
-bool generateRingZigzag(const SingleShape& part, const coord_t period, const MedialZigzagAnchor* previous, MedialZigzagAnchor& anchor, OpenLinesSet& zigzag_lines)
-{
-    // Find the dominant hole.
-    size_t hole_idx = 0;
-    double hole_length = 0.0;
-    for (size_t poly_idx = 1; poly_idx < part.size(); poly_idx++)
-    {
-        const double length = double(part[poly_idx].length());
-        if (length > hole_length)
-        {
-            hole_length = length;
-            hole_idx = poly_idx;
-        }
-    }
-    const double outer_length = double(part.outerPolygon().length());
-    if (hole_idx == 0 || hole_length < 0.25 * outer_length)
-    {
-        return false; // The hole is a small cutout rather than the inner wall of a ring; handle the part differently.
-    }
-
-    const WallChain outer_wall = closedWall(part.outerPolygon());
-    const WallChain inner_wall = closedWall(part[hole_idx]);
-    if (outer_wall.total_ <= 0.0 || inner_wall.total_ <= 0.0)
-    {
-        return false;
-    }
-
-    // The medial axis of a ring is approximated by the average of its two walls. The common number of
-    // node periods follows from its length and the reference node period, kept from the layer below
-    // while it is still within tolerance.
-    const double axis_length = (outer_wall.total_ + inner_wall.total_) / 2.0;
-    const size_t num_periods = choosePeriodCount(axis_length, period, previous, true);
-
-    // Give both walls a common parameter origin (on the +X ray from the hole center) so that the phase
-    // relation between the walls is well-defined and stable across layers.
-    const Point2LL origin = AABB(part[hole_idx]).getMiddle();
-    const double anchor_outer = rayCrossingParameter(outer_wall, origin);
-    const double anchor_inner = rayCrossingParameter(inner_wall, origin);
-
-    OpenPolyline zigzag;
-    for (size_t node_idx = 0; node_idx < num_periods; node_idx++)
-    {
-        zigzag.push_back(outer_wall.pointAt(anchor_outer + double(node_idx) / num_periods * outer_wall.total_));
-        zigzag.push_back(inner_wall.pointAt(anchor_inner + (node_idx + 0.5) / num_periods * inner_wall.total_));
-    }
-    zigzag.push_back(outer_wall.pointAt(anchor_outer)); // Close the loop.
-    zigzag_lines.push_back(std::move(zigzag));
-
-    anchor.is_ring = true;
-    anchor.num_periods = num_periods;
-    const Point2LL on_outer = outer_wall.pointAt(anchor_outer);
-    const Point2LL on_inner = inner_wall.pointAt(anchor_inner);
-    anchor.match_point = Point2LL((on_outer.X + on_inner.X) / 2, (on_outer.Y + on_inner.Y) / 2); // Between the walls: inside the ring body.
-    return true;
-}
-
-/*!
- * Generate the zigzag for an elongated part without holes (slab, L-shape, C-shape, ...): compute the
- * medial axis and sample node positions on a regular arc-length grid along it, alternating between the
- * two sides. At each sample position the node is placed where the local normal of the axis (the local
- * 'node cutting plane') first hits the wall on that side.
- *
- * When the layer below produced a matching part, the grid of this layer is anchored to it: the axis
- * keeps the same orientation, the period count is kept while within tolerance, and the grid phase is
- * chosen such that the samples land where the samples of the layer below were (the reference sample of
- * the layer below is projected onto the current axis). Without a layer below, the grid is centered on
- * the middle of the axis and the orientation is chosen canonically, both of which are stable choices too.
- */
-bool generateRibbonZigzag(const SingleShape& part, const coord_t period, const MedialZigzagAnchor* previous, MedialZigzagAnchor& anchor, OpenLinesSet& zigzag_lines)
-{
-    std::optional<OpenPolyline> axis = computeMedialAxisPath(part);
-    if (! axis.has_value())
-    {
-        return false;
-    }
-
-    // Keep the axis orientation stable across layers: match the end points to the layer below, or
-    // without a layer below orient by coordinates. The orientation determines which side is 'upper'.
-    const auto oriented_backwards = [&]() -> bool
-    {
-        const Point2LL& front = axis->front();
-        const Point2LL& back = axis->back();
-        if (previous != nullptr && ! previous->is_ring)
-        {
-            const double keep = distanceF(front, previous->axis_front) + distanceF(back, previous->axis_back);
-            const double flip = distanceF(front, previous->axis_back) + distanceF(back, previous->axis_front);
-            return flip < keep;
-        }
-        return std::make_pair(back.X, back.Y) < std::make_pair(front.X, front.Y);
-    };
-    if (oriented_backwards())
-    {
-        std::reverse(axis->begin(), axis->end());
-    }
-
-    WallChain axis_chain;
-    axis_chain.points_.assign(axis->begin(), axis->end());
-    axis_chain.finish();
-    const double axis_length = axis_chain.total_;
-    if (axis_length < period / 2.0)
-    {
-        return false; // Too short to give a meaningful direction; handle the part differently.
-    }
-
-    const WallChain wall = closedWall(part.outerPolygon());
-
-    // The number of periods and the node spacing along the axis. The spacing is kept *exactly* from the
-    // layer below while the part still fits it (hysteresis): the measured axis length jitters a little
-    // from layer to layer (especially at its ends), and re-deriving the spacing from it every layer
-    // would wobble all node positions far from the grid anchor.
-    const double target = axis_length / period;
-    size_t num_periods;
-    double axis_period;
-    if (previous != nullptr && ! previous->is_ring && previous->axis_period > 0.0 && previous->num_periods >= 1
-        && std::abs(target - double(previous->num_periods)) <= 0.75)
-    {
-        num_periods = previous->num_periods;
-        axis_period = previous->axis_period;
-    }
-    else
-    {
-        num_periods = std::max<size_t>(1, std::llround(target));
-        axis_period = axis_length / double(num_periods);
-    }
-
-    // The phase of the sample grid: the arc position of one upper-side sample. Anchored to the layer
-    // below when available, otherwise to the middle of the axis.
-    const double grid_anchor = (previous != nullptr && ! previous->is_ring) ? nearestArcPosition(axis_chain, previous->phase_point) : axis_length / 2.0;
-
-    // Enumerate the grid: upper samples at grid_anchor + k * axis_period, lower samples half a period
-    // further, keeping a margin to the axis ends (where the axis direction is poorly defined).
-    const double margin = 0.2 * axis_period;
-    const long step_min = static_cast<long>(std::ceil((margin - grid_anchor) / (0.5 * axis_period)));
-    const long step_max = static_cast<long>(std::floor((axis_length - margin - grid_anchor) / (0.5 * axis_period)));
-
-    bool produced = false;
-    OpenPolyline zigzag;
-    const auto flush_zigzag = [&zigzag, &zigzag_lines, &produced]()
-    {
-        if (zigzag.size() >= 2)
-        {
-            zigzag_lines.push_back(std::move(zigzag));
-            produced = true;
-        }
-        zigzag.clear();
-    };
-
-    for (long step = step_min; step <= step_max; step++)
-    {
-        const double s = grid_anchor + 0.5 * axis_period * step;
-        const Point2LL origin = axis_chain.pointAt(s);
-
-        // The local axis direction, averaged over half a period to be insensitive to skeleton noise.
-        const double window = std::min(axis_length / 2.0, period / 2.0);
-        const Point2LL ahead = axis_chain.pointAt(std::min(s + window, axis_length));
-        const Point2LL behind = axis_chain.pointAt(std::max(s - window, 0.0));
-        const double direction_x = double(ahead.X - behind.X);
-        const double direction_y = double(ahead.Y - behind.Y);
-        const double direction_length = std::hypot(direction_x, direction_y);
-        if (direction_length <= 0.0)
-        {
-            flush_zigzag();
-            continue;
-        }
-
-        // The local normal, pointing towards the side this node belongs to. Even grid steps are the
-        // upper-side samples, odd steps the lower-side samples.
-        const bool upper = ((step % 2) + 2) % 2 == 0;
-        const double side = upper ? 1.0 : -1.0;
-        constexpr double direction_scale = 65536.0; // The ray direction is only used for its direction, but has integer coordinates.
-        const Point2LL normal(std::llround(-direction_y / direction_length * direction_scale * side), std::llround(direction_x / direction_length * direction_scale * side));
-
-        // The node lies where the normal ray first hits the wall of this side.
-        const std::optional<double> s_wall = rayBoundaryArcPosition(wall, origin, normal);
-        if (! s_wall.has_value())
-        {
-            flush_zigzag();
-            continue;
-        }
-        zigzag.push_back(wall.pointAt(*s_wall));
-    }
-    flush_zigzag();
-
-    if (produced)
-    {
-        anchor.is_ring = false;
-        anchor.num_periods = num_periods;
-        anchor.axis_period = axis_period;
-        anchor.axis_front = axis_chain.points_.front();
-        anchor.axis_back = axis_chain.points_.back();
-        anchor.match_point = axis_chain.pointAt(axis_length / 2.0);
-        // The reference sample for the layer above: the upper-side grid sample closest to the axis middle.
-        const double s_reference = std::clamp(grid_anchor + std::round((axis_length / 2.0 - grid_anchor) / axis_period) * axis_period, 0.0, axis_length);
-        anchor.phase_point = axis_chain.pointAt(s_reference);
-    }
-    return produced;
-}
-
 int computeScanSegmentIdx(const int x, const int line_width)
 {
     if (x < 0)
@@ -678,37 +481,235 @@ void generatePlaneZigzag(const Polygon& outer_polygon, const PointMatrix& rotati
     flush_zigzag();
 }
 
-} // namespace
-
-void generateMedialZigzagLines(
-    const Shape& region,
-    const coord_t line_distance,
-    const double plane_angle,
-    coord_t plane_shift,
-    const std::vector<MedialZigzagAnchor>& previous_anchors,
-    std::vector<MedialZigzagAnchor>& new_anchors,
-    OpenLinesSet& result)
+/*!
+ * One node of the zigzag. The node position together with the foot of its perpendicular on the
+ * medial axis spans the node's vertical reference plane (in 2D: the ray from the axis foot through
+ * the node), which is used to map the node onto the next layer. When the cross-section drifts or
+ * rotates from layer to layer, the plane is re-derived each layer from the node's new position and
+ * the local medial axis, so it keeps following the walls; on constant cross-sections the re-derived
+ * plane is identical every layer, so the nodes stay on fixed vertical planes.
+ */
+struct TrackedNode
 {
-    if (line_distance <= 0 || region.empty())
+    Point2LL axis_foot_; //!< The foot of the perpendicular from the node to the medial axis.
+    Point2LL position_; //!< The node position on the wall.
+};
+
+/*!
+ * The zigzag structure of one connected part: its nodes in zigzag order (alternating between the
+ * two walls), plus the part outline used to find the corresponding part on the next layer.
+ */
+struct TrackedPart
+{
+    bool closed_ = false; //!< Ring parts close their zigzag into a loop.
+    Shape shape_; //!< The outline of the part on the last processed layer, used to find the corresponding part on the next layer by overlap.
+    std::vector<TrackedNode> nodes_;
+};
+
+/*!
+ * Remove protruding details (e.g. rows of sawteeth) from a part's walls with a morphological opening,
+ * so that nodes are placed on (or mapped to) the main wall envelope and never wander into a
+ * protrusion. The opening is only used when it doesn't shatter or shrink the part, which happens when
+ * the part itself is barely wider than the opening; the generated lines are clipped against the real
+ * region at the end either way, so they always stay inside the solid region.
+ */
+SingleShape openedPart(const SingleShape& part, const coord_t opening_radius, const Simplify& simplifier)
+{
+    const std::vector<SingleShape> opened_parts = part.offset(-opening_radius).offset(opening_radius).splitIntoParts();
+    if (opened_parts.size() == 1 && opened_parts.front().area() >= 0.7 * part.area())
     {
-        return;
+        SingleShape opened{ simplifier.polygon(opened_parts.front()) };
+        if (! opened.empty() && opened.outerPolygon().size() >= 3)
+        {
+            return opened;
+        }
+    }
+    return part;
+}
+
+/*!
+ * Build the reference nodes for a ring-like part (a part with a dominant hole, e.g. an annulus): the
+ * two walls are the outer wall and the hole wall. Both walls get the same number of node periods,
+ * distributed uniformly along each wall's own arc length, half a period out of phase in the
+ * normalized parameter, connected alternately into a closed loop. The medial axis of a ring is the
+ * midway curve between the two walls.
+ */
+bool buildRingReference(const SingleShape& part, const coord_t period, TrackedPart& reference)
+{
+    // Find the dominant hole.
+    size_t hole_idx = 0;
+    double hole_length = 0.0;
+    for (size_t poly_idx = 1; poly_idx < part.size(); poly_idx++)
+    {
+        const double length = double(part[poly_idx].length());
+        if (length > hole_length)
+        {
+            hole_length = length;
+            hole_idx = poly_idx;
+        }
+    }
+    const double outer_length = double(part.outerPolygon().length());
+    if (hole_idx == 0 || hole_length < 0.25 * outer_length)
+    {
+        return false; // The hole is a small cutout rather than the inner wall of a ring; handle the part differently.
     }
 
+    const WallChain outer_wall = closedWall(part.outerPolygon());
+    const WallChain inner_wall = closedWall(part[hole_idx]);
+    if (outer_wall.total_ <= 0.0 || inner_wall.total_ <= 0.0)
+    {
+        return false;
+    }
+
+    // The number of node periods follows from the medial axis length (approximated by the average of
+    // the two walls) and the reference spacing, rounded up so the spacing never exceeds the reference.
+    const double axis_length = (outer_wall.total_ + inner_wall.total_) / 2.0;
+    const size_t num_periods = std::max<size_t>(3, static_cast<size_t>(std::ceil(axis_length / period)));
+
+    // Give both walls a common parameter origin (on the +X ray from the hole center) so that the phase
+    // relation between the walls is well-defined and deterministic.
+    const Point2LL origin = AABB(part[hole_idx]).getMiddle();
+    const double anchor_outer = rayCrossingParameter(outer_wall, origin);
+    const double anchor_inner = rayCrossingParameter(inner_wall, origin);
+
+    // The ring's medial axis: the curve midway between the two walls, sampled densely.
+    WallChain axis;
+    axis.closed_ = true;
+    const size_t axis_samples = std::max<size_t>(64, 8 * num_periods);
+    for (size_t sample_idx = 0; sample_idx < axis_samples; sample_idx++)
+    {
+        const double fraction = double(sample_idx) / double(axis_samples);
+        const Point2LL on_outer = outer_wall.pointAt(anchor_outer + fraction * outer_wall.total_);
+        const Point2LL on_inner = inner_wall.pointAt(anchor_inner + fraction * inner_wall.total_);
+        axis.points_.emplace_back((on_outer.X + on_inner.X) / 2, (on_outer.Y + on_inner.Y) / 2);
+    }
+    axis.finish();
+
+    const auto add_node = [&reference, &axis](const Point2LL& position) -> bool
+    {
+        const Point2LL foot = axis.pointAt(nearestArcPosition(axis, position));
+        if (foot == position)
+        {
+            return false; // Degenerate: no perpendicular direction, so no reference plane. Skip this node.
+        }
+        reference.nodes_.push_back({ foot, position });
+        return true;
+    };
+
+    for (size_t node_idx = 0; node_idx < num_periods; node_idx++)
+    {
+        add_node(outer_wall.pointAt(anchor_outer + double(node_idx) / num_periods * outer_wall.total_));
+        add_node(inner_wall.pointAt(anchor_inner + (node_idx + 0.5) / num_periods * inner_wall.total_));
+    }
+    if (reference.nodes_.size() < 3)
+    {
+        return false;
+    }
+    reference.closed_ = true;
+    return true;
+}
+
+/*!
+ * Build the reference nodes for an elongated part without a dominant hole (slab, L-shape, C-shape...):
+ * compute the medial axis and split the boundary at the two axis ends into the two side walls. The
+ * common period count N = ceil(axis length / reference spacing) is shared by both walls; each wall
+ * distributes its nodes uniformly along its own arc length (the longer wall thus gets a larger actual
+ * spacing), with the two walls half a period out of phase in the normalized arc-length parameter:
+ * the longer wall's nodes lie at i/N (starting right at the axis start), the shorter wall's nodes at
+ * (i+1/2)/N. The nodes are connected alternately into one open polyline.
+ */
+bool buildRibbonReference(const SingleShape& part, const coord_t period, TrackedPart& reference)
+{
+    std::optional<OpenPolyline> axis = computeMedialAxisPath(part);
+    if (! axis.has_value())
+    {
+        return false;
+    }
+    // Deterministic axis orientation (which end is the start doesn't matter, but it must be stable).
+    if (std::make_pair(axis->back().X, axis->back().Y) < std::make_pair(axis->front().X, axis->front().Y))
+    {
+        std::reverse(axis->begin(), axis->end());
+    }
+
+    WallChain axis_chain;
+    axis_chain.points_.assign(axis->begin(), axis->end());
+    axis_chain.finish();
+    const double axis_length = axis_chain.total_;
+    if (axis_length < period / 2.0)
+    {
+        return false; // Too short to give a meaningful direction; handle the part differently.
+    }
+    const size_t num_periods = std::max<size_t>(1, static_cast<size_t>(std::ceil(axis_length / period)));
+
+    // Split the boundary into the two side walls where the extensions of the medial axis (following
+    // its end tangents) hit the wall. This is well-defined even when the axis end is equidistant to
+    // several walls (e.g. in a rectangle, where the nearest wall point would be ambiguous).
+    const WallChain wall = closedWall(part.outerPolygon());
+    if (wall.total_ <= 0.0)
+    {
+        return false;
+    }
+    const auto split_position = [&wall, &axis_chain](const Point2LL& end, const Point2LL& inward) -> double
+    {
+        const std::optional<double> extended = rayArcPosition(wall, end, double(end.X - inward.X), double(end.Y - inward.Y));
+        return extended.has_value() ? *extended : nearestArcPosition(wall, end);
+    };
+    const double split_front = split_position(axis_chain.points_.front(), axis_chain.points_[1]);
+    const double split_back = split_position(axis_chain.points_.back(), axis_chain.points_[axis_chain.points_.size() - 2]);
+    WallChain side_a = subChain(wall, split_front, split_back);
+    WallChain side_b = subChain(wall, split_back, split_front);
+    // side_b runs from the axis end back to the axis start; reverse it so both sides are parameterized
+    // from the axis start towards the axis end.
+    std::reverse(side_b.points_.begin(), side_b.points_.end());
+    side_b.finish();
+    if (side_a.total_ <= 0.0 || side_b.total_ <= 0.0)
+    {
+        return false;
+    }
+    const WallChain& long_wall = (side_a.total_ >= side_b.total_) ? side_a : side_b;
+    const WallChain& short_wall = (side_a.total_ >= side_b.total_) ? side_b : side_a;
+
+    const auto add_node = [&reference, &axis_chain](const WallChain& on_wall, const double u) -> bool
+    {
+        const Point2LL position = on_wall.pointAt(u * on_wall.total_);
+        const Point2LL foot = axis_chain.pointAt(nearestArcPosition(axis_chain, position));
+        if (foot == position)
+        {
+            return false; // Degenerate: no perpendicular direction, so no reference plane. Skip this node.
+        }
+        reference.nodes_.push_back({ foot, position });
+        return true;
+    };
+
+    // Alternate between the walls: the longer wall at i/N (starting at the axis start), the shorter
+    // wall at (i+1/2)/N, so the two walls are half a period out of phase in the normalized parameter.
+    for (size_t node_idx = 0; node_idx <= num_periods; node_idx++)
+    {
+        add_node(long_wall, double(node_idx) / num_periods);
+        if (node_idx < num_periods)
+        {
+            add_node(short_wall, (node_idx + 0.5) / num_periods);
+        }
+    }
+    if (reference.nodes_.size() < 2)
+    {
+        return false;
+    }
+    reference.closed_ = false;
+    return true;
+}
+
+/*!
+ * Build the reference zigzag structures for all parts of the reference cross-section.
+ */
+std::vector<TrackedPart> buildTrackedParts(const Shape& region, const coord_t line_distance, const Simplify& simplifier)
+{
     // Distance between two nodes on the same wall, measured along the wall; consecutive zigzag nodes
     // (which alternate between the two walls) are half of this period apart.
     const coord_t period = 2 * line_distance;
-
-    // Parameters for the cutting-plane fallback used for parts without a usable medial axis.
-    const PointMatrix rotation_matrix(plane_angle);
-    plane_shift = ((plane_shift % line_distance) + line_distance) % line_distance;
-
-    // Simplify the walls before analyzing them; the voronoi diagram and the node placement don't need
-    // (and shouldn't be disturbed by) micron-sized boundary details.
-    const Simplify simplifier(100, 25, 0);
-
     const coord_t opening_radius = line_distance / 2;
 
-    OpenLinesSet zigzag_lines;
+    std::vector<TrackedPart> references;
     for (const SingleShape& raw_part : region.splitIntoParts())
     {
         SingleShape part{ simplifier.polygon(raw_part) };
@@ -716,48 +717,368 @@ void generateMedialZigzagLines(
         {
             continue;
         }
+        part = openedPart(part, opening_radius, simplifier);
 
-        // Remove protruding details (e.g. rows of sawteeth) from the walls with a morphological opening,
-        // so the nodes are placed on the main wall envelope and never wander into a protrusion. The
-        // opening is only used when it doesn't shatter or shrink the part (which happens when the part
-        // itself is barely wider than the opening); the lines are clipped against the real region at the
-        // end either way, so they always stay inside the solid region.
-        const std::vector<SingleShape> opened_parts = part.offset(-opening_radius).offset(opening_radius).splitIntoParts();
-        if (opened_parts.size() == 1 && opened_parts.front().area() >= 0.7 * part.area())
+        TrackedPart reference;
+        bool built = false;
+        if (part.size() > 1)
         {
-            part = SingleShape{ simplifier.polygon(opened_parts.front()) };
-            if (part.empty() || part.outerPolygon().size() < 3)
+            built = buildRingReference(part, period, reference);
+        }
+        if (! built)
+        {
+            built = buildRibbonReference(part, period, reference);
+        }
+        if (built)
+        {
+            reference.shape_ = part;
+            references.push_back(std::move(reference));
+        }
+        // Parts without a usable reference structure get the cutting-plane fallback on every layer.
+    }
+    return references;
+}
+
+/*!
+ * All crossings of a node's reference plane (the line through the axis foot and the node position)
+ * with the walls of a part. The crossing parameter t is 0 at the axis foot and 1 at the node
+ * position, so t > 0 is "the node's side of the axis".
+ */
+struct PlaneCrossing
+{
+    double t_;
+    Point2LL point_;
+};
+
+void collectPlaneCrossings(const SingleShape& part, const Point2LL& origin, const double direction_x, const double direction_y, std::vector<PlaneCrossing>& crossings)
+{
+    const auto cross = [](const double ax, const double ay, const double bx, const double by)
+    {
+        return ax * by - ay * bx;
+    };
+    for (const Polygon& polygon : part)
+    {
+        const size_t point_count = polygon.size();
+        for (size_t point_idx = 0; point_idx < point_count; point_idx++)
+        {
+            const Point2LL& p0 = polygon[point_idx];
+            const Point2LL& p1 = polygon[(point_idx + 1) % point_count];
+            const double denominator = cross(direction_x, direction_y, p1.X - p0.X, p1.Y - p0.Y);
+            if (std::abs(denominator) < 1e-9)
             {
                 continue;
             }
+            const double t = cross(p0.X - origin.X, p0.Y - origin.Y, p1.X - p0.X, p1.Y - p0.Y) / denominator;
+            const double u = cross(p0.X - origin.X, p0.Y - origin.Y, direction_x, direction_y) / denominator;
+            if (u < 0.0 || u >= 1.0)
+            {
+                continue;
+            }
+            crossings.push_back({ t, Point2LL(std::llround(origin.X + t * direction_x), std::llround(origin.Y + t * direction_y)) });
         }
-        const MedialZigzagAnchor* previous = findPreviousAnchor(previous_anchors, part);
+    }
+}
 
-        MedialZigzagAnchor anchor;
-        bool generated = false;
-        if (part.size() > 1)
+/*!
+ * Map the nodes of the tracked parts onto the walls of this layer and update the tracked state, so
+ * that the next layer can be mapped from this one. For every node, its reference plane (spanned by
+ * the vertical direction and the perpendicular from the node to the medial axis, as recorded in the
+ * tracked state) is intersected with the walls of the corresponding part; only crossings on the
+ * node's side of the axis count, and the crossing closest to the node's previous position is taken.
+ * Nodes whose plane has no such crossing are invalid on this layer: they are skipped (never clamped
+ * to a wall end or placed outside the walls) and keep their previous plane, so they can become valid
+ * again on a later layer.
+ *
+ * After mapping, each node's reference plane is re-derived from its new position: the chord of the
+ * plane through the part gives a fresh axis point (the chord midpoint), and the perpendicular to the
+ * local axis direction (estimated from the neighboring nodes' chord midpoints) gives the plane
+ * orientation. On constant cross-sections this reproduces exactly the same plane, keeping the nodes
+ * on fixed vertical planes; on drifting or twisting cross-sections the planes follow the geometry.
+ *
+ * Layer parts without a corresponding tracked part get the cutting-plane fallback. The lines are
+ * clipped against the real region, so no lines cross holes; a line leaving the solid region and
+ * re-entering it continues as a new polyline.
+ */
+OpenLinesSet propagateLayer(
+    std::vector<TrackedPart>& tracks,
+    const Shape& region,
+    const coord_t line_distance,
+    const PointMatrix& rotation_matrix,
+    const coord_t plane_shift,
+    const Simplify& simplifier)
+{
+    const coord_t opening_radius = line_distance / 2;
+
+    // Match every part of this layer to the tracked part it overlaps most with. Overlap (rather than
+    // a point-containment test) keeps the correspondence intact when the cross-section drifts
+    // sideways from layer to layer.
+    std::vector<SingleShape> parts;
+    for (const SingleShape& raw_part : region.splitIntoParts())
+    {
+        SingleShape part{ simplifier.polygon(raw_part) };
+        if (! part.empty() && part.outerPolygon().size() >= 3)
         {
-            // Ring-like part: the two walls are the outer wall and the wall of the dominant hole.
-            generated = generateRingZigzag(part, period, previous, anchor, zigzag_lines);
+            parts.push_back(std::move(part));
         }
-        if (! generated)
+    }
+    std::vector<std::vector<size_t>> track_parts(tracks.size());
+    std::vector<size_t> fallback_parts;
+    for (size_t part_idx = 0; part_idx < parts.size(); part_idx++)
+    {
+        size_t best_track = std::numeric_limits<size_t>::max();
+        double best_overlap = 0.0;
+        for (size_t track_idx = 0; track_idx < tracks.size(); track_idx++)
         {
-            // Elongated part: the two walls are the boundary chains on either side of the medial axis.
-            generated = generateRibbonZigzag(part, period, previous, anchor, zigzag_lines);
+            const double overlap = parts[part_idx].intersection(tracks[track_idx].shape_).area();
+            if (overlap > best_overlap)
+            {
+                best_overlap = overlap;
+                best_track = track_idx;
+            }
         }
-        if (generated)
+        if (best_track == std::numeric_limits<size_t>::max())
         {
-            new_anchors.push_back(anchor);
+            fallback_parts.push_back(part_idx);
         }
         else
         {
-            generatePlaneZigzag(part.outerPolygon(), rotation_matrix, plane_shift, line_distance, zigzag_lines);
+            track_parts[best_track].push_back(part_idx);
         }
     }
 
-    // Clip against the actual region (including its holes and details): segments crossing a hole or
-    // leaving the part through a concavity are cut at the boundary and continue where they re-enter.
-    result.push_back(region.intersection(zigzag_lines));
+    OpenLinesSet zigzag_lines;
+    for (size_t track_idx = 0; track_idx < tracks.size(); track_idx++)
+    {
+        TrackedPart& track = tracks[track_idx];
+        if (track_parts[track_idx].empty())
+        {
+            continue; // The part vanished on this layer; the nodes keep their planes in case it reappears.
+        }
+
+        // Node placement uses the morphologically opened walls, so nodes stay on the main wall
+        // envelope instead of being captured by protruding details (e.g. rows of sawteeth).
+        std::vector<SingleShape> walls;
+        Shape combined_shape;
+        for (const size_t part_idx : track_parts[track_idx])
+        {
+            walls.push_back(openedPart(parts[part_idx], opening_radius, simplifier));
+            combined_shape.push_back(parts[part_idx]);
+        }
+
+        // First pass: intersect each node's plane with the walls. The node moves to the crossing on
+        // its side of the axis that is closest to its previous position; the chord midpoint (between
+        // this crossing and the one across the part) samples the local medial axis.
+        struct MappedNode
+        {
+            bool valid_ = false;
+            Point2LL position_;
+            std::optional<Point2LL> chord_midpoint_;
+        };
+        std::vector<MappedNode> mapped(track.nodes_.size());
+        std::vector<PlaneCrossing> crossings;
+        for (size_t node_idx = 0; node_idx < track.nodes_.size(); node_idx++)
+        {
+            const TrackedNode& node = track.nodes_[node_idx];
+            const double direction_x = double(node.position_.X - node.axis_foot_.X);
+            const double direction_y = double(node.position_.Y - node.axis_foot_.Y);
+            if (direction_x == 0.0 && direction_y == 0.0)
+            {
+                continue;
+            }
+            crossings.clear();
+            for (const SingleShape& wall_part : walls)
+            {
+                collectPlaneCrossings(wall_part, node.axis_foot_, direction_x, direction_y, crossings);
+            }
+
+            // The node's new position: the crossing on the node's side (t > 0), closest to the node's
+            // previous position (t == 1). No crossing there means the node is invalid on this layer.
+            double t_node = 0.0;
+            double best_error = std::numeric_limits<double>::max();
+            for (const PlaneCrossing& crossing : crossings)
+            {
+                const double error = std::abs(crossing.t_ - 1.0);
+                if (crossing.t_ > 1e-6 && error < best_error)
+                {
+                    best_error = error;
+                    t_node = crossing.t_;
+                    mapped[node_idx].position_ = crossing.point_;
+                    mapped[node_idx].valid_ = true;
+                }
+            }
+            if (! mapped[node_idx].valid_)
+            {
+                continue;
+            }
+
+            // The crossing across the part (the other end of the plane's chord through the solid
+            // material): the nearest crossing before the node whose chord midpoint lies inside.
+            double t_partner = std::numeric_limits<double>::lowest();
+            for (const PlaneCrossing& crossing : crossings)
+            {
+                if (crossing.t_ < t_node - 1e-6 && crossing.t_ > t_partner)
+                {
+                    t_partner = crossing.t_;
+                }
+            }
+            if (t_partner > std::numeric_limits<double>::lowest())
+            {
+                const double t_mid = (t_node + t_partner) / 2.0;
+                const Point2LL midpoint(std::llround(node.axis_foot_.X + t_mid * direction_x), std::llround(node.axis_foot_.Y + t_mid * direction_y));
+                for (const SingleShape& wall_part : walls)
+                {
+                    if (wall_part.inside(midpoint, true))
+                    {
+                        mapped[node_idx].chord_midpoint_ = midpoint;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Second pass: re-derive each node's plane from its new position. The local axis direction is
+        // estimated from the neighboring chord midpoints; the new plane is perpendicular to it.
+        std::vector<size_t> midpoint_nodes;
+        for (size_t node_idx = 0; node_idx < track.nodes_.size(); node_idx++)
+        {
+            if (! track.closed_ && (node_idx == 0 || node_idx + 1 == track.nodes_.size()))
+            {
+                continue; // End node chords run along the axis instead of across it; not usable as axis samples.
+            }
+            if (mapped[node_idx].valid_ && mapped[node_idx].chord_midpoint_.has_value())
+            {
+                midpoint_nodes.push_back(node_idx);
+            }
+        }
+        for (size_t node_idx = 0; node_idx < track.nodes_.size(); node_idx++)
+        {
+            if (! mapped[node_idx].valid_)
+            {
+                continue; // Invalid on this layer: the node keeps its previous plane.
+            }
+            TrackedNode& node = track.nodes_[node_idx];
+            // The end nodes of an open chain sit at the axis ends, where their planes contain the
+            // axis direction rather than being perpendicular to it, so the perpendicular re-derivation
+            // below doesn't apply to them: their planes only translate along with the node.
+            const bool is_end_node = ! track.closed_ && (node_idx == 0 || node_idx + 1 == track.nodes_.size());
+            if (is_end_node || ! mapped[node_idx].chord_midpoint_.has_value())
+            {
+                // Translate the plane with the node, keeping its orientation.
+                node.axis_foot_ += mapped[node_idx].position_ - node.position_;
+                node.position_ = mapped[node_idx].position_;
+                continue;
+            }
+            const Point2LL midpoint = *mapped[node_idx].chord_midpoint_;
+
+            // The neighboring chord midpoints around this node (wrapping around for rings).
+            const auto neighbor_it = std::lower_bound(midpoint_nodes.begin(), midpoint_nodes.end(), node_idx);
+            const size_t rank = std::distance(midpoint_nodes.begin(), neighbor_it);
+            const size_t count = midpoint_nodes.size();
+            std::optional<Point2LL> before;
+            std::optional<Point2LL> after;
+            if (count >= 2)
+            {
+                if (track.closed_)
+                {
+                    before = *mapped[midpoint_nodes[(rank + count - 1) % count]].chord_midpoint_;
+                    after = *mapped[midpoint_nodes[(rank + 1) % count]].chord_midpoint_;
+                }
+                else
+                {
+                    before = *mapped[midpoint_nodes[rank == 0 ? 0 : rank - 1]].chord_midpoint_;
+                    after = *mapped[midpoint_nodes[std::min(rank + 1, count - 1)]].chord_midpoint_;
+                }
+            }
+            const double chord_length = distanceF(mapped[node_idx].position_, midpoint);
+            double axis_dx = before.has_value() ? double(after->X - before->X) : 0.0;
+            double axis_dy = before.has_value() ? double(after->Y - before->Y) : 0.0;
+            const double axis_length = std::hypot(axis_dx, axis_dy);
+            bool rotated = false;
+            if (axis_length > 1.0 && chord_length > 10.0)
+            {
+                // The new plane: through the node, perpendicular to the local axis direction, with the
+                // axis foot at the chord's distance so the crossing search stays calibrated (t == 1 at
+                // the node).
+                double normal_x = -axis_dy / axis_length;
+                double normal_y = axis_dx / axis_length;
+                if (normal_x * (mapped[node_idx].position_.X - midpoint.X) + normal_y * (mapped[node_idx].position_.Y - midpoint.Y) < 0.0)
+                {
+                    normal_x = -normal_x;
+                    normal_y = -normal_y;
+                }
+                // Sanity-cap the rotation: consecutive layers only twist the cross-section a little, so
+                // a wildly different plane orientation indicates a degenerate tangent estimate (e.g. from
+                // a chord caught in a boundary detail) and is ignored, keeping the previous orientation.
+                const double old_length = distanceF(node.position_, node.axis_foot_);
+                const double along_old = old_length <= 0.0 ? 1.0 : (normal_x * (node.position_.X - node.axis_foot_.X) + normal_y * (node.position_.Y - node.axis_foot_.Y)) / old_length;
+                if (along_old > std::numbers::sqrt2 / 2.0) // Less than 45 degrees away from the previous plane.
+                {
+                    node.axis_foot_ = mapped[node_idx].position_ - Point2LL(std::llround(normal_x * chord_length), std::llround(normal_y * chord_length));
+                    rotated = true;
+                }
+            }
+            if (! rotated)
+            {
+                node.axis_foot_ += mapped[node_idx].position_ - node.position_;
+            }
+            node.position_ = mapped[node_idx].position_;
+        }
+        track.shape_ = combined_shape;
+
+        // The zigzag polyline of this layer: the valid nodes in zigzag order.
+        OpenPolyline zigzag;
+        for (const MappedNode& node : mapped)
+        {
+            if (node.valid_)
+            {
+                zigzag.push_back(node.position_);
+            }
+        }
+        if (track.closed_ && zigzag.size() >= 3)
+        {
+            zigzag.push_back(zigzag.front()); // Close the ring loop.
+        }
+        if (zigzag.size() >= 2)
+        {
+            zigzag_lines.push_back(std::move(zigzag));
+        }
+        else
+        {
+            for (const size_t part_idx : track_parts[track_idx])
+            {
+                generatePlaneZigzag(parts[part_idx].outerPolygon(), rotation_matrix, plane_shift, line_distance, zigzag_lines);
+            }
+        }
+    }
+    for (const size_t part_idx : fallback_parts)
+    {
+        generatePlaneZigzag(parts[part_idx].outerPolygon(), rotation_matrix, plane_shift, line_distance, zigzag_lines);
+    }
+
+    // Clip against the actual region (including its holes and details): no lines inside holes; segments
+    // crossing a hole or leaving the part through a concavity are cut at the boundary and continue as a
+    // new polyline where they re-enter the solid region.
+    return region.intersection(zigzag_lines);
+}
+
+} // namespace
+
+void generateMedialZigzagLines(const Shape& region, const coord_t line_distance, const double plane_angle, coord_t plane_shift, OpenLinesSet& result)
+{
+    if (line_distance <= 0 || region.empty())
+    {
+        return;
+    }
+    // Simplify the walls before analyzing them; the voronoi diagram and the node placement don't need
+    // (and shouldn't be disturbed by) micron-sized boundary details.
+    const Simplify simplifier(100, 25, 0);
+    const PointMatrix rotation_matrix(plane_angle);
+    plane_shift = ((plane_shift % line_distance) + line_distance) % line_distance;
+
+    // The stand-alone region acts as its own reference cross-section; mapping it onto itself
+    // reproduces the reference nodes.
+    std::vector<TrackedPart> tracks = buildTrackedParts(region, line_distance, simplifier);
+    result.push_back(propagateLayer(tracks, region, line_distance, rotation_matrix, plane_shift, simplifier));
 }
 
 MedialZigzagGenerator::MedialZigzagGenerator(const SliceMeshStorage& mesh)
@@ -783,26 +1104,60 @@ MedialZigzagGenerator::MedialZigzagGenerator(const SliceMeshStorage& mesh)
         const double rotation_rads = plane_angle * std::numbers::pi / 180;
         plane_shift = origin.X * std::cos(rotation_rads) - origin.Y * std::sin(rotation_rads);
     }
+    if (line_distance > 0)
+    {
+        plane_shift = ((plane_shift % line_distance) + line_distance) % line_distance;
+    }
 
-    // Generate the layers bottom-up, anchoring each layer to the anchors of the layer below.
     lines_per_layer_.resize(mesh.layers.size());
-    std::vector<MedialZigzagAnchor> previous_anchors;
-    std::vector<MedialZigzagAnchor> current_anchors;
+    if (line_distance <= 0 || mesh.layers.empty())
+    {
+        return;
+    }
+    const Simplify simplifier(100, 25, 0);
+    const PointMatrix rotation_matrix(plane_angle);
+
+    // The infill regions of all layers, and the reference cross-section: the layer with the largest
+    // infill area. The reference nodes generated there define the reference planes through which the
+    // nodes are mapped from layer to layer, upwards and downwards from the reference cross-section.
+    std::vector<Shape> regions(mesh.layers.size());
+    size_t reference_layer = 0;
+    double largest_area = -1.0;
     for (size_t layer_nr = 0; layer_nr < mesh.layers.size(); layer_nr++)
     {
-        Shape region;
         for (const SliceLayerPart& part : mesh.layers[layer_nr].parts)
         {
-            region.push_back(part.getOwnInfillArea().offset(region_offset));
+            regions[layer_nr].push_back(part.getOwnInfillArea().offset(region_offset));
         }
-        region = region.unionPolygons();
-        if (region.empty())
+        regions[layer_nr] = regions[layer_nr].unionPolygons();
+        const double area = regions[layer_nr].area();
+        if (area > largest_area)
         {
-            continue; // Keep the previous anchors, so the pattern continues unchanged above a gap.
+            largest_area = area;
+            reference_layer = layer_nr;
         }
-        current_anchors.clear();
-        generateMedialZigzagLines(region, line_distance, plane_angle, plane_shift, previous_anchors, current_anchors, lines_per_layer_[layer_nr]);
-        std::swap(previous_anchors, current_anchors);
+    }
+    if (largest_area <= 0.0)
+    {
+        return;
+    }
+    std::vector<TrackedPart> tracks = buildTrackedParts(regions[reference_layer], line_distance, simplifier);
+    lines_per_layer_[reference_layer] = propagateLayer(tracks, regions[reference_layer], line_distance, rotation_matrix, plane_shift, simplifier);
+
+    std::vector<TrackedPart> tracks_down = tracks; // Both directions start from the reference cross-section's state.
+    for (size_t layer_nr = reference_layer + 1; layer_nr < mesh.layers.size(); layer_nr++)
+    {
+        if (! regions[layer_nr].empty())
+        {
+            lines_per_layer_[layer_nr] = propagateLayer(tracks, regions[layer_nr], line_distance, rotation_matrix, plane_shift, simplifier);
+        }
+    }
+    for (size_t layer_nr = reference_layer; layer_nr-- > 0;)
+    {
+        if (! regions[layer_nr].empty())
+        {
+            lines_per_layer_[layer_nr] = propagateLayer(tracks_down, regions[layer_nr], line_distance, rotation_matrix, plane_shift, simplifier);
+        }
     }
 }
 
